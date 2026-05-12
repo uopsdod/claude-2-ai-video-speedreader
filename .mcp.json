@@ -1,0 +1,33 @@
+{
+  "mcpServers": {
+    "supabase_remote": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@supabase/mcp-server-supabase@latest",
+        "--project-ref=XXXXX"
+      ],
+      "env": {
+        "SUPABASE_ACCESS_TOKEN": "sbp_XXXXX"
+      }
+    },
+     "context7": {
+      "type": "http",
+      "url": "https://mcp.context7.com/mcp"
+    },
+    "playwright": {
+      "command": "npx",
+      "args": [
+        "@playwright/mcp@latest"
+      ]
+    },
+    "vercel": {
+      "type": "http",
+      "url": "https://mcp.vercel.com"
+    },
+    "stripe": {
+      "type": "http",
+      "url": "https://mcp.stripe.com"
+    }
+  }
+}
