@@ -143,16 +143,55 @@ Tell the student (verbatim, with the exact menu path):
 
 ### Step 4 — Deploy to Vercel
 
+#### Step 4.A — Convert the Lovable project to a Vite SPA (preemptive, one prompt)
+
+Lovable's v1 may use **TanStack Start with `@lovable.dev/vite-tanstack-config`**, which is Cloudflare-Workers-targeted. Deploying that as-is to Vercel results in a green build that 404s on every route. To avoid that detour entirely, **run one preemptive Lovable prompt to convert to a plain Vite SPA before we touch Vercel.**
+
+Tell the student verbatim:
+
+> 「在 Vercel deploy 之前，先在 Lovable 跑這個 prompt，把專案改成 Vite + React SPA（Vercel 才能正確 serve）：」
+
+Then paste this prompt for the student to copy into Lovable:
+
+```
+Convert this project to a plain Vite + React + shadcn SPA suitable for static deployment on Vercel. Specifically:
+
+1. Remove the `@lovable.dev/vite-tanstack-config` import in vite.config.ts and replace with a standard `@vitejs/plugin-react` setup. The final vite.config.ts should look roughly like:
+   import { defineConfig } from "vite";
+   import react from "@vitejs/plugin-react";
+   import path from "path";
+   export default defineConfig({
+     plugins: [react()],
+     resolve: { alias: { "@": path.resolve(__dirname, "./src") } },
+   });
+2. Remove any Cloudflare-specific build scripts and dependencies from package.json (e.g. `wrangler`, `build:cloudflare`, `@cloudflare/*`).
+3. Remove any TanStack Start server entry points (typically `app/router.tsx`, `app/ssr.tsx`, `app/api/*`, or similar SSR handlers). Keep the React client code under `src/`.
+4. Ensure `npm run build` (or `bun run build`) produces a static `dist/` folder with `index.html` and assets — NO server functions, NO Workers handlers.
+5. Keep all the existing UI (landing page, Sign In / Sign Up pages, /app shell) and the Supabase auth integration. Only the build/deploy target changes.
+
+After this conversion, Vercel will auto-detect Framework Preset = Vite and the site will deploy correctly.
+```
+
+**Verify before moving on:**
+- `vite.config.ts` no longer imports `@lovable.dev/vite-tanstack-config`
+- Sign-up / sign-in still works in the Lovable preview after the conversion
+- The conversion commit has synced to GitHub (`gh api repos/<owner>/<repo>/commits --jq '.[0].commit.message'` should show a recent commit)
+
+If sign-up broke during the conversion, re-prompt Lovable: 「Sign-up flow broke after the Vite SPA conversion. Restore the Supabase auth flow using the already-connected `@supabase/supabase-js` client. Keep the project as a pure Vite SPA — no SSR, no TanStack Start.」
+
+#### Step 4.B — Import GitHub repo to Vercel
+
 Tell the student:
 
 > 1. 到 https://vercel.com/new
 > 2. 點 **Import Git Repository**
 > 3. 找到剛剛 Lovable 建的 repo，點 **Import**
 >    - **如果 Vercel 看不到 repo**：你可能是第一次從這個 GitHub 帳號用 Vercel — Vercel 會要你裝 **"Vercel for GitHub" App** 並選給它哪些 repo 的權限。選 Lovable 建的那個 repo（或勾「All repositories」較方便）。
-> 4. 進到 project 設定頁。Framework Preset 應該會自動偵測成 **Vite**（Lovable 預設用 Vite + React）— 如果偵測錯（例如 "Other" 或 Next.js），手動改成 **Vite**
-> 5. **Environment Variables**：把 Lovable 在 Step 1.B 連 Supabase 時寫進來的 env vars 也複製到 Vercel（通常是 `VITE_SUPABASE_URL` + `VITE_SUPABASE_ANON_KEY` — 在 Lovable 的 `.env` 檔或 Lovable 的 Supabase integration 設定頁裡看得到）
-> 6. 點 **Deploy**
-> 7. 等 ~1 分鐘，deploy 完成後 Vercel 會給一個 `https://<repo-name>-<random>.vercel.app` 的 URL
+> 4. 進到 project 設定頁。Framework Preset 現在應該會自動偵測成 **Vite**（因為 Step 4.A 已經轉成 Vite SPA）— 確認一下，如果還是被偵測成 "Other" 或別的，手動改成 **Vite**
+> 5. **Build & Output settings** — 維持預設值即可：Build Command = `npm run build`（或 `vite build`），Output Directory = `dist`，Root Directory = `./`
+> 6. **Environment Variables**：把 Lovable 在 Step 1.B 連 Supabase 時寫進來的 env vars 也複製到 Vercel（通常是 `VITE_SUPABASE_URL` + `VITE_SUPABASE_ANON_KEY` — 在 Lovable 的 `.env` 檔或 Lovable 的 Supabase integration 設定頁裡看得到）
+> 7. 點 **Deploy**
+> 8. 等 ~1 分鐘，deploy 完成後 Vercel 會給一個 `https://<repo-name>-<random>.vercel.app` 的 URL
 
 Ask the student to paste the Vercel deploy URL back here. Then test the sign-up / sign-in flow on the Vercel URL too — confirm it still works after deploy (env var typos are the #1 cause of "works in Lovable preview but broken on Vercel").
 
@@ -189,6 +228,9 @@ LLMs (and students following along) tend to drift in these ways:
 
 8. **Not testing sign-up after Vercel deploy.**
    Sign-up works in Lovable preview but breaks on Vercel? Almost always means the Supabase env vars (`VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`, or equivalent) didn't get copied into Vercel's Environment Variables panel. Re-check there. **The checklist (`m0-landing-page-checklist`) has a specific test for this — don't skip it.**
+
+9. **Skipping Step 4.A (the Vite SPA conversion) and going straight to Vercel import.**
+   Lovable's v1 often uses TanStack Start + `@lovable.dev/vite-tanstack-config` (Cloudflare-Workers-targeted SSR). If you let the student import that directly into Vercel, the build succeeds but every route 404s — and the student spends an hour debugging Vercel config thinking it's a framework preset issue. **Always run Step 4.A first** (the preemptive Lovable conversion prompt) before touching Vercel, even if the student says "I just want to deploy now." Default course path is Vite + Vercel, NOT TanStack Start + Cloudflare.
 
 ## Expected duration
 
