@@ -81,13 +81,17 @@ docker volume rm <the-volumes-listed>
 
 Then re-run `supabase start`. Useful when migrations get into a weird half-applied state, or when you want a clean slate without affecting remote.
 
-### How to get the anon key
+### How to get the publishable key (formerly "anon key")
+
+Supabase recently renamed the browser-safe key from "anon key" to **"publishable key"** (`sb_publishable_*`). They're the same role — RLS-gated, safe to ship in client code. Older docs / `supabase status` output may still call it `ANON_KEY`.
 
 ```bash
 supabase status --output json
 ```
 
-Then extract the `ANON_KEY` value from the JSON. This is the publishable key you put in `NEXT_PUBLIC_SUPABASE_ANON_KEY`.
+Extract `ANON_KEY` (legacy CLI output name) OR `PUBLISHABLE_KEY` (new) from the JSON — whichever is present. This value goes into your client env var, conventionally `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` or the legacy `NEXT_PUBLIC_SUPABASE_ANON_KEY` (either name works — it's just an env var name; pick one and apply consistently).
+
+**Never confuse this with the secret / service_role key.** That one is server-only — exposing it in browser code = full bypass of RLS = total compromise.
 
 ---
 

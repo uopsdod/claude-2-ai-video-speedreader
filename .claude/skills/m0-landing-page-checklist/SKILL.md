@@ -1,6 +1,6 @@
 ---
 name: m0-landing-page-checklist
-description: Course 2 Milestone 0 verification — checks every artifact (GitHub repo, Lovable sync, Vercel deploy, landing page contents) is real and correctly wired. Use when the student says "驗收 M0", "check M0", "M0 done?", or after the `m0-landing-page` skill completes Step 5.
+description: Course 2 Milestone 0 verification — checks every artifact (GitHub repo, Lovable sync, Vercel deploy, landing page contents) is real and correctly wired. Use when the student says "驗收 M0", "check M0", "M0 done?", or after the `m0-landing-page` skill completes Step 6.
 ---
 
 # M0 — Landing Page Checklist
@@ -9,7 +9,7 @@ description: Course 2 Milestone 0 verification — checks every artifact (GitHub
 
 Verifies the student has actually completed M0 — not just *thinks* they have. LLMs (and humans) skip steps. This skill goes through every artifact and tests it, then reports pass/fail per item.
 
-**Run this AFTER `m0-landing-page` Step 5, or any time the student claims M0 is done.**
+**Run this AFTER `m0-landing-page` Step 6, or any time the student claims M0 is done.**
 
 ## How to run
 
@@ -17,7 +17,7 @@ Verifies the student has actually completed M0 — not just *thinks* they have. 
 
 ### Step 1: Collect URLs from the student (one message)
 
-Ask the student for these three URLs upfront:
+Ask the student for these four URLs upfront:
 
 1. GitHub repo URL (e.g. `https://github.com/<username>/<product-name>`)
 2. Lovable project URL (e.g. `https://lovable.dev/projects/<id>`)
@@ -127,7 +127,7 @@ E0 + E1 cover the first; E2–E4 cover the second.
 | E0 | Student has a Supabase organization under their own account | **Active verification (prefer MCP):** Call `mcp__supabase_remote__get_project_url` or any `mcp__supabase_remote__*` tool — if it returns successfully, the MCP is authenticated to the student's Supabase account, which means an org exists. <br>**Fallback (no MCP):** ask the student to run `supabase orgs list` (requires `supabase login` first) and paste the output. Should show at least one org. <br>**Last resort (no CLI either):** ask the student to open https://supabase.com/dashboard and confirm they see at least one organization. |
 | E1 | Supabase project `video-speed-reader` (or similar) exists inside the student's own org and matches the URL the student gave | **Active verification (prefer MCP):** Call `mcp__supabase_remote__list_tables` or similar — returns a project context. Cross-reference the project ref in the MCP output against the `<ref>` in the student-supplied Supabase URL. They must match. <br>**Fallback (CLI):** `supabase projects list` — should include a row whose ref matches the supplied URL. <br>**If the URL's project ref isn't in the student's account at all**, the Lovable connection went to a shared/demo space. Re-do `m0-landing-page` Step 1.B and pick "create new" explicitly inside the student's org. |
 | E2 | Supabase project responds | Hit `curl -sI https://<ref>.supabase.co/rest/v1/` — should return HTTP 401 (without API key) or 200 (some versions). Anything else (DNS error, 5xx) means the project is paused / deleted. |
-| E3 | Vercel deploy has Supabase env vars set | **Active verification (prefer Vercel MCP):** if a `mcp__vercel__*` tool for listing env vars is available, call it and grep for `SUPABASE`. <br>**Fallback (CLI):** `cd <project-dir> && vercel env ls` — should list at least one var matching `*SUPABASE_URL*` and one matching `*SUPABASE_ANON_KEY*`. <br>**Last resort:** ask the student to go to Vercel project → Settings → Environment Variables and paste the variable names back. <br>If missing, this is the #1 cause of "auth works in Lovable preview but not on Vercel." |
+| E3 | Vercel deploy has Supabase env vars set | **Active verification (prefer Vercel MCP):** if a `mcp__vercel__*` tool for listing env vars is available, call it and grep for `SUPABASE`. <br>**Fallback (CLI):** `cd <project-dir> && vercel env ls` — should list at least one var matching `*SUPABASE_URL*` and one matching either `*SUPABASE_PUBLISHABLE_KEY*` (new Supabase naming) OR `*SUPABASE_ANON_KEY*` (legacy naming; still valid). <br>**Last resort:** ask the student to go to Vercel project → Settings → Environment Variables and paste the variable names back. <br>If missing, this is the #1 cause of "auth works in Lovable preview but not on Vercel." |
 | E4 | Sign-up + sign-in actually works on the Vercel deploy + user lands in Supabase `auth.users` | **Hybrid: student does the browser test, you verify the side effect.** Tell the student: "請打開 `<vercel-url>` (用 incognito 視窗)，點 Sign Up，用一個測試 email 註冊（例如 `test-m0-<時間戳>@example.com`），登入後應該看到 `/app` 頁面顯示 'Hi {email}'。完成跟我說。" <br>When they confirm, **verify the user actually landed in Supabase**: use `mcp__supabase_remote__execute_sql` to run `SELECT email, created_at FROM auth.users ORDER BY created_at DESC LIMIT 5` — the test email should appear at the top with a `created_at` within the last few minutes. <br>If MCP unavailable, fall back to `supabase db execute` or ask student to look at Supabase dashboard → Authentication → Users. |
 
 If E0 fails: student hasn't signed up for Supabase. Stop everything, send them to register, then resume.
