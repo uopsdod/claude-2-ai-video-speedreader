@@ -48,7 +48,7 @@ M0 builds **Video Speed Reader** — the exact same product as this course's ref
 
 ## Conversational flow
 
-The skill is conversational — you (Claude Code) drive the student through 5 steps. Don't dump all the steps at once. After each step, **wait for confirmation** before moving to the next.
+The skill is conversational — you (Claude Code) drive the student through 6 steps. Don't dump all the steps at once. After each step, **wait for confirmation** before moving to the next.
 
 > **Before Step 1:** confirm the student has done the one-time CLI + MCP setup. If not, **load the `m0-landing-page-prerequisites` skill first** and walk them through it. The checklist at the end of M0 will need `gh` / `vercel` / `supabase` CLIs (and ideally Vercel + Supabase MCPs) — if they're missing, the verification will stall at the worst moment. A quick sanity check before starting:
 >
@@ -58,11 +58,11 @@ The skill is conversational — you (Claude Code) drive the student through 5 st
 >
 > If any of those error out, switch to `m0-landing-page-prerequisites` skill and come back.
 
-### Step 1 — Create the Lovable project and connect Supabase BEFORE prompting
+### Step 1 — Create the Lovable project AND a separate Supabase project (do not connect them yet)
 
-This is the most important sequencing decision in M0. If the student gives Lovable the full prompt before connecting integrations, Lovable scaffolds auth with mock state (or its own placeholder backend), and the student then has to re-prompt Lovable to migrate that auth to Supabase — burning an extra free-tier generation and risking a half-migrated state.
+This step has two parallel sub-steps. The student creates the Lovable project AND a Supabase project, but they are NOT wired together yet. Lovable's v1 will auto-use **Lovable Cloud** (Lovable's own managed Supabase) as the backend; we'll switch over to the student's own Supabase project in **Step 5** as a clean one-shot operation. Connecting Supabase to Lovable now would just create a half-state where the student thinks auth runs against their project but it actually runs against Lovable Cloud.
 
-**The order (verified by walking through Lovable):** create a Lovable project → connect Supabase (this can be done before generating real content) → give the full Video Speed Reader prompt → connect GitHub (so the generated code lands in a repo) → import into Vercel. Notice that **GitHub connection comes AFTER the full prompt**, not before — Lovable lets you connect Supabase to a fresh project, but GitHub integration only becomes useful once there's real generated code to push.
+**Order verified by walking through Lovable:** create a Lovable project → create a Supabase project in parallel (not connected to Lovable) → give the full Video Speed Reader prompt (auth runs on Lovable Cloud) → connect GitHub → deploy to Vercel → swap backend to the student's own Supabase in one go.
 
 Tell the student (verbatim, with the exact menu paths):
 
@@ -70,22 +70,24 @@ Tell the student (verbatim, with the exact menu paths):
 > 1. 到 https://lovable.dev/，登入後從 dashboard 點 **+ New project**（或類似的「建立新專案」按鈕）
 > 2. 如果 Lovable 要求你打一個初始 prompt，輸入最簡單的 placeholder：`Create a blank project for a SaaS product called Video Speed Reader.` — 這只是讓你進到專案 workspace，**不要在這一步就貼正式 prompt**
 > 3. 等 Lovable 跑完初始 scaffold（30秒到一分鐘）
+> 4. 把 Lovable project URL 貼回來給我（格式 `https://lovable.dev/projects/<id>`）
 >
-> **B. 連 Supabase**（GitHub 等到 prompt 跑完才連 — 見 Step 3）
-> 1. 點上方或側邊的 **Supabase** icon（或從 Project Settings → Integrations → Supabase）
-> 2. 選 **Connect Supabase**
-> 3. 登入你的 Supabase 帳號授權
-> 4. 選一個現有 Supabase project，或讓 Lovable 幫你建一個新的（這個課程建議**新建**，名字用 `video-speed-reader`）
-> 5. Lovable 會自動把 Supabase URL 跟 anon key 寫進專案環境
-> 6. 把 Supabase project URL 貼回來給我（格式 `https://<ref>.supabase.co`）
+> **B. 在 Supabase dashboard 建一個 project（不要在 Lovable 連）**
+> 1. 到 https://supabase.com/dashboard
+> 2. 點 **New project**（在你的 org 底下）
+> 3. Name 填 `video-speed-reader`，region 選離你近的，database password 隨意（之後 M1 才會用到）
+> 4. 等 Supabase 把 project 啟動好（通常 1–2 分鐘）
+> 5. 把 Supabase project URL 貼回來給我（格式 `https://<ref>.supabase.co`）
+>
+> ⚠️ **不要**在 Lovable 點 Connect Supabase。我們現在故意讓 Lovable 跑在它預設的 Lovable Cloud 上，等 Step 5 再一次性切換到你的 Supabase project。如果在這一步就連 Lovable + Supabase，Lovable 的 v1 還是會用 Lovable Cloud，反而會產生混淆狀態。
 
-**Verify before moving on:** the student must have given you the Supabase project URL before Step 2.
+**Verify before moving on:** the student must have given you both URLs (Lovable project URL + Supabase project URL) before Step 2.
 
-> **Note for Claude Code:** If the student asks about modifying the Supabase schema during this step (e.g. "should I add a `profiles` table?"), say **no — M0 only uses the default `auth.users` table that Supabase auto-creates**. Custom tables come in M1.
+> **Note for Claude Code:** If the student asks about modifying the Supabase schema during this step (e.g. "should I add a `profiles` table?"), say **no — M0 only uses the default `auth.users` table that Supabase auto-creates**. Custom tables come in M1. Also if the student insists on connecting Supabase to Lovable now, gently push back — explain Lovable Cloud will still take precedence and we'll do the swap cleanly in Step 5.
 
 ### Step 2 — Give Lovable the full Video Speed Reader prompt
 
-Now that Supabase is connected, Lovable's next generation will wire Supabase auth directly. Paste this prompt into the chat for the student to copy into Lovable verbatim:
+Lovable will generate v1 using **Lovable Cloud as the auth backend** (its default). That's fine for now — Step 5 will swap to the student's own Supabase. Paste this prompt into the chat for the student to copy into Lovable verbatim:
 
 ```
 Build a SaaS landing page + authenticated app shell for Video Speed Reader, a product that turns any video into an accurate transcript in three minutes, targeted at content creators, educators, and engineers who record long-form video and need a fast, clean transcript to repurpose into blog posts, course notes, or searchable archives.
@@ -100,11 +102,11 @@ The site must include:
      * Card 3: "可商用授權 (Commercial-use ready)" — you own the output, use it however you like
    - Footer with copyright "© 2026 Video Speed Reader"
 
-2. Authentication using the already-connected Supabase Auth (do NOT use mock auth; use the Supabase client that's already wired up via the integration):
+2. Authentication using Lovable's built-in Supabase-style auth (use whatever auth backend Lovable provides by default — Lovable Cloud is fine for this v1; we'll swap to a user-owned Supabase project in a later step):
    - Sign Up page with email + password
    - Sign In page with email + password
    - Sign Out functionality
-   - Email confirmation can be disabled for simplicity in this v1 — assume the Supabase project has "Confirm email" turned off
+   - Email confirmation can be disabled for simplicity in this v1
 
 3. An authenticated app shell at `/app` that the user lands on after signing in:
    - Greets the signed-in user by email: "Hi {user.email}"
@@ -189,13 +191,81 @@ Tell the student:
 >    - **如果 Vercel 看不到 repo**：你可能是第一次從這個 GitHub 帳號用 Vercel — Vercel 會要你裝 **"Vercel for GitHub" App** 並選給它哪些 repo 的權限。選 Lovable 建的那個 repo（或勾「All repositories」較方便）。
 > 4. 進到 project 設定頁。Framework Preset 現在應該會自動偵測成 **Vite**（因為 Step 4.A 已經轉成 Vite SPA）— 確認一下，如果還是被偵測成 "Other" 或別的，手動改成 **Vite**
 > 5. **Build & Output settings** — 維持預設值即可：Build Command = `npm run build`（或 `vite build`），Output Directory = `dist`，Root Directory = `./`
-> 6. **Environment Variables**：把 Lovable 在 Step 1.B 連 Supabase 時寫進來的 env vars 也複製到 Vercel（通常是 `VITE_SUPABASE_URL` + `VITE_SUPABASE_ANON_KEY` — 在 Lovable 的 `.env` 檔或 Lovable 的 Supabase integration 設定頁裡看得到）
+> 6. **Environment Variables**：M0 在 Step 4 的時候 Lovable 還用 Lovable Cloud，所以你 .env 裡看到的 Supabase 相關 env vars 是 Lovable Cloud 注入的。先把這些值（無論變數名叫 `VITE_SUPABASE_URL` / `VITE_SUPABASE_ANON_KEY` / `VITE_SUPABASE_PUBLISHABLE_KEY`）複製進 Vercel（讓 Vercel build 不會 fail）。Step 5 切換成學員自己的 Supabase 之後會再把這些值換掉。
 > 7. 點 **Deploy**
 > 8. 等 ~1 分鐘，deploy 完成後 Vercel 會給一個 `https://<repo-name>-<random>.vercel.app` 的 URL
 
 Ask the student to paste the Vercel deploy URL back here. Then test the sign-up / sign-in flow on the Vercel URL too — confirm it still works after deploy (env var typos are the #1 cause of "works in Lovable preview but broken on Vercel").
 
-### Step 5 — Final verification
+> **Heads up — auth right now is on Lovable Cloud, not the student's own Supabase.** Even though Step 1.B "connected Supabase," Lovable's v1 actually uses its **Lovable Cloud** managed backend by default (a Lovable-owned Supabase project, not the one in the student's org). Test users from sign-up will land in Lovable Cloud, NOT in `auth.users` of the student's own Supabase project. We fix this in Step 5 before the final checklist — otherwise checklist E1/E4 will fail because the test user won't appear in the student's Supabase dashboard.
+
+### Step 5 — Switch backend from Lovable Cloud to the student's own Supabase
+
+Until now, sign-up / sign-in works — but the users are stored in **Lovable Cloud** (Lovable's managed backend), not the Supabase project the student created in Step 1.B. We need to repoint Lovable at the student's own Supabase before M1 can do anything meaningful (M1 will write custom tables to a Supabase the student doesn't control = bad).
+
+Confirm with the student first:
+
+> 「現在 sign up / sign in 雖然能跑，但使用者其實是存在 Lovable Cloud（Lovable 自己的 Supabase），不是你 Step 1.B 連的那個 Supabase project。我們現在要切過去你自己的 Supabase。」
+
+#### Step 5.A — Have the student grab their own Supabase project's URL + publishable key
+
+Tell the student:
+
+> 1. 到 https://supabase.com/dashboard
+> 2. 點進 Step 1.B 建的 `video-speed-reader` project
+> 3. 左邊 sidebar → **Project Settings** → **API Keys**（新版 Supabase）或 **API**（舊版）
+> 4. 複製這兩個值貼回來給我：
+>    - **Project URL**（格式 `https://<ref>.supabase.co`）
+>    - **Publishable key**（開頭是 `sb_publishable_...`）
+>      - 如果 dashboard 還用舊版命名，這個欄位可能標 "anon public" — 是同一個 key、可以放心用。
+>      - **不要**複製到 "Secret key" / "service_role" — 那是 server-only，絕對不能放在前端 / Vercel 的 `VITE_*` env var 裡。
+
+(MCP fallback: if Supabase MCP is wired, you can also call `mcp__supabase_remote__get_project_url` and `mcp__supabase_remote__get_publishable_keys` to fetch these directly without bothering the student. Confirm they match what the student would see in dashboard.)
+
+#### Step 5.B — Give Lovable the switchover prompt
+
+Paste this prompt for the student to copy into Lovable verbatim, replacing `<URL>` and `<PUBLISHABLE_KEY>` with the values from Step 5.A:
+
+```
+Switch this project's backend from Lovable Cloud to the user's own Supabase project. Do NOT keep any Lovable Cloud references.
+
+Specifically:
+
+1. Find every place the project currently uses Lovable Cloud's Supabase client (Lovable's auto-provisioned `supabase` client, typically in `src/integrations/supabase/client.ts` or similar). Update it to use these credentials instead:
+
+   VITE_SUPABASE_URL=<URL>
+   VITE_SUPABASE_PUBLISHABLE_KEY=<PUBLISHABLE_KEY>
+
+   Note: Supabase's newer "publishable key" (`sb_publishable_*`) replaces what used to be called the "anon key". They're the same role (browser-safe, RLS-gated). If the codebase already uses `VITE_SUPABASE_ANON_KEY`, you can either:
+   - Rename to `VITE_SUPABASE_PUBLISHABLE_KEY` for consistency with current Supabase naming, OR
+   - Keep `VITE_SUPABASE_ANON_KEY` as the variable name but put the new `sb_publishable_*` value in it (works fine; it's just an env var name).
+   Pick one and apply consistently across `.env`, the client init code, and any docs.
+
+2. Update the `.env` file (or `.env.local`) to use the values above. Remove any Lovable Cloud env vars (e.g. anything prefixed with `LOVABLE_CLOUD_*` or that points to a Lovable-owned Supabase ref).
+
+3. Make sure the Supabase client is initialized exactly once and reads from `import.meta.env.VITE_SUPABASE_URL` and the matching key env var — no hardcoded URLs.
+
+4. Disconnect / remove the Lovable Cloud integration if there's a UI toggle for it (Project Settings → Integrations → Lovable Cloud → disconnect). If you can't toggle it, at least make sure the code only references the new Supabase project.
+
+5. Keep the Sign Up / Sign In / Sign Out flow exactly as it is. Only the backend target changes.
+
+After this change, sign-up should create users in the student's own Supabase auth.users table — verify by signing up a NEW test user in the Lovable preview, then checking the student's Supabase dashboard → Authentication → Users — the new email should appear there.
+```
+
+**Verify before moving on:**
+
+1. **In Lovable preview**: sign up with a NEW test email (e.g. `test-switch-<timestamp>@example.com`). Sign-in should still work.
+2. **In the student's Supabase dashboard** (or via Supabase MCP): the new test email must appear in `auth.users`. You can verify via `mcp__supabase_remote__execute_sql`:
+   ```sql
+   SELECT email, created_at FROM auth.users ORDER BY created_at DESC LIMIT 3;
+   ```
+   The new test email should be at the top, with a `created_at` within the last few minutes.
+3. **Vercel will auto-redeploy** when Lovable pushes the conversion commit to GitHub. Wait for that, then test sign-up on the Vercel URL one more time — the new user should land in the student's Supabase too.
+4. **Vercel Environment Variables** still need to match: confirm `VITE_SUPABASE_URL` and the publishable key env var (`VITE_SUPABASE_PUBLISHABLE_KEY` or `VITE_SUPABASE_ANON_KEY` — whichever name Lovable settled on) in Vercel project → Settings → Environment Variables match the new values from Step 5.A. If Lovable's `.env` got pushed to git (it shouldn't — `.env` should be gitignored — but check anyway), the values may have been baked in. Either way, set them in Vercel and re-deploy.
+
+If the test user doesn't appear in the student's Supabase, the switchover didn't fully take. Re-prompt Lovable: 「Sign-up is still going to Lovable Cloud instead of the configured Supabase project. Confirm the Supabase client in `src/integrations/supabase/client.ts` reads ONLY from `import.meta.env.VITE_SUPABASE_URL` and the publishable-key env var (the one set in Step 5.B), and disconnect Lovable Cloud entirely.」
+
+### Step 6 — Final verification
 
 Once the student gives you the Vercel URL, run the M0 checklist skill (`m0-landing-page-checklist`) to verify every artifact exists and is correctly wired.
 
@@ -227,7 +297,7 @@ LLMs (and students following along) tend to drift in these ways:
    Lovable will sometimes propose creating a `profiles` table, a `videos` table, or RPC functions for "later use". **Block this in M0** — say no. M0 uses only the default `auth.users` table that Supabase auto-creates. Custom tables / RPCs / migrations are M1, and they must follow the migration-file-first rule (see `supabase-best-practice` skill). Letting Lovable create ad-hoc schema in M0 means the student has untracked schema state going into M1.
 
 8. **Not testing sign-up after Vercel deploy.**
-   Sign-up works in Lovable preview but breaks on Vercel? Almost always means the Supabase env vars (`VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`, or equivalent) didn't get copied into Vercel's Environment Variables panel. Re-check there. **The checklist (`m0-landing-page-checklist`) has a specific test for this — don't skip it.**
+   Sign-up works in Lovable preview but breaks on Vercel? Almost always means the Supabase env vars (`VITE_SUPABASE_URL` + the publishable-key env var, whether named `VITE_SUPABASE_PUBLISHABLE_KEY` or the legacy `VITE_SUPABASE_ANON_KEY`) didn't get copied into Vercel's Environment Variables panel. Re-check there. **The checklist (`m0-landing-page-checklist`) has a specific test for this — don't skip it.**
 
 9. **Skipping Step 4.A (the Vite SPA conversion) and going straight to Vercel import.**
    Lovable's v1 often uses TanStack Start + `@lovable.dev/vite-tanstack-config` (Cloudflare-Workers-targeted SSR). If you let the student import that directly into Vercel, the build succeeds but every route 404s — and the student spends an hour debugging Vercel config thinking it's a framework preset issue. **Always run Step 4.A first** (the preemptive Lovable conversion prompt) before touching Vercel, even if the student says "I just want to deploy now." Default course path is Vite + Vercel, NOT TanStack Start + Cloudflare.
