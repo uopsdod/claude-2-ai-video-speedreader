@@ -1,27 +1,29 @@
 ---
 name: project-2-ai-video-reader
-description: Show the milestone architecture progression for the Claude Code Course 2 (Building a SaaS with Claude Code). Covers M0 (Lovable landing page) → M1 (local dev) → M2 (EC2) → M3 (Stripe) → M4 (domain) → M5 (Lambda + Fargate serverless), mapped to course chapters 2.1–2.5, including required external accounts per milestone. Use when the user asks about the Course 2 architecture, milestone progression, which accounts to register for which chapter, or how the subtitle-manager stack evolved.
+description: Show the milestone architecture progression for the Claude Code Course 2 (Building a SaaS with Claude Code). Covers M0 (Lovable landing page) → M1 (Vercel + EC2 worker, Whisper-only TXT) → M2 (Stripe) → M3 (domain) → M4 (Lambda + Fargate serverless), mapped to course chapters 2.1–2.5, including required external accounts per milestone. Use when the user asks about the Course 2 architecture, milestone progression, which accounts to register for which chapter, or how the subtitle-manager stack evolved.
 ---
 
 Show the milestone architecture progression for the Claude Code Course 2 (Building a SaaS with Claude Code).
 
 ## Milestone ↔ 課程章節對應
 
-這份檔案是技術架構演進（M0 → M5），對應到課程章節（2.1 → 2.5）如下：
+這份檔案是技術架構演進（M0 → M4），對應到課程章節（2.1 → 2.5）如下：
 
 | 課程章節 | Milestone | 這節新增的 external accounts |
 |---|---|---|
 | **2.1** 快速搭建第一版可登入的 SaaS 入口網站 | **M0** Landing page | GitHub、Lovable、Supabase、Vercel |
-| **2.2** 打造 AI 影片摘要核心功能 | **M1** Local Development + **M2** EC2 Deployment | OpenAI、Anthropic |
-| **2.3** 串接點數制金流，讓使用者用多少付多少 | **M3** Add Stripe payment | Stripe |
-| **2.4** 綁定自己的網域，讓產品變成真正「自己的」 | **M4** Domain | AWS（用 Route 53）、Domain registrar（Namecheap / Cloudflare / GoDaddy 任一） |
-| **2.5** 營運成本歸零、營收無上限的雲端擴展 | **M5 (Optional)** Fully Serverless Scaling | （沿用 M4 的 AWS 帳號，這節用到 Lambda + ECS Fargate + EventBridge） |
+| **2.2** 打造 AI 影片摘要核心功能 | **M1** Vercel + EC2 worker (Whisper-only TXT) | OpenAI、AWS（EC2） |
+| **2.3** 串接點數制金流，讓使用者用多少付多少 | **M2** Add Stripe payment | Stripe |
+| **2.4** 綁定自己的網域，讓產品變成真正「自己的」 | **M3** Domain | Domain registrar（Namecheap / Cloudflare / GoDaddy 任一）；AWS Route 53 用 M1 已開的帳號 |
+| **2.5** 營運成本歸零、營收無上限的雲端擴展 | **M4 (Optional)** Fully Serverless Scaling | （沿用 M1 的 AWS 帳號，這節用到 Lambda + ECS Fargate + EventBridge） |
 
-**累計帳號數：** M0 後 4 個 → M1+M2 後 6 個 → M3 後 7 個 → M4 後 8 個（+ domain registrar）→ M5 不變。
+**累計帳號數：** M0 後 4 個 → M1 後 6 個 → M2 後 7 個 → M3 後 7 個（+ domain registrar）→ M4 不變。
 
 **報名前最低要求（M0 開始之前）：** GitHub、Lovable、Supabase、Vercel 這 4 個。其他在課程中循序帶開。
 
-**為什麼 M1 + M2 都映到 2.2：** 2.2 的學習目標是「跑完整條 AI pipeline」。M1 用本機 Docker 跑完整條 pipeline 是「把它跑得起來」；M2 把同一條 pipeline 搬到 EC2 是「讓它 24/7 跑」。這兩段對學員是同一個學習主題（AI 影片摘要核心）的兩個階段，所以合併到 2.2 是對的。
+**M1 範圍說明：** M1 學習目標是「跑通 AI 影片摘要 pipeline 的核心」。為了讓學員把注意力放在「web → 排隊 → worker → Whisper → 取回逐字稿」這條主軸，M1 故意把 pipeline 砍到只剩 `pending → downloading → transcribe → done`、輸出只有 TXT、worker 跑在一台 EC2 上（避開 Mac/Windows 的 ffmpeg 環境問題）。SRT/VTT、LLM 後處理（block-combining、typo check、proofread）、人工 review 這些留到後面當作進階主題。
+
+**M1 為什麼直接上 EC2 而不是先在本機：** 一台便宜的 Ubuntu EC2（t3.small）上裝 ffmpeg + python 是兩行 apt — 但同樣的事情在 Mac 跟 Windows 上會卡住一半的學員（Homebrew 沒裝、PATH 沒設、Windows 完全沒有 native ffmpeg）。直接從 EC2 開始，第一次接 AWS 也順便建好給後面 M3（Route 53）跟 M4（Lambda + Fargate）用的帳號，少走一段。
 
 ---
 
@@ -81,126 +83,86 @@ Show the milestone architecture progression for the Claude Code Course 2 (Buildi
 
 ---
 
-## Architecture (Milestone 1) — Local Development
-> 對應課程章節 **2.2 — 打造 AI 影片摘要核心功能**（前半段：先在本機跑通完整 pipeline）
+## Architecture (Milestone 1) — Vercel + EC2 worker (Whisper-only TXT)
+> 對應課程章節 **2.2 — 打造 AI 影片摘要核心功能**
 
 ```
-[User Browser] → [Vercel: Next.js app] → [Supabase DB (remote)]
-                                                ↑
-                          [Local machine: distributor.py + Docker containers]
+[User Browser] ──video URL──▶ [Vercel: Next.js 16 app] ──POST /api/jobs──▶ [Supabase: jobs + job_sessions]
+                                                                                         ▲ poll pending every 10s
+                                                                                         │
+                                                                              [AWS EC2 (t3.small Ubuntu):
+                                                                                distributor.py + worker.py
+                                                                                (plain Python, no Docker)]
+                                                                                         │
+                                                                                         ▼
+                                                                                 [OpenAI Whisper API]
 ```
 
-- **Remote Vercel** — Next.js web app (UI, API routes, auth)
-- **Remote Supabase** — Database, auth, storage (shared interface between web app and workers)
-- **Local distributor** — `worker/distributor.py` polls Supabase for pending jobs and spawns Docker containers
-- **Local workers** — `worker/worker.py` runs inside Docker containers, one per job, handling the full pipeline:
-  `download → transcribe (Whisper) → combine blocks → add spacing → replace corrections → typo check (ChatGPT) → semantic fix → proofread (Claude) → done`
+- **Remote Vercel** — Next.js 16 (App Router) web app: landing page, sign-in/up/out, `/upload` form, `/api/jobs` route handler.
+- **Remote Supabase** — Postgres + auth + RLS. Two M1 tables: `jobs` (status FSM) + `job_sessions` (TXT content).
+- **AWS EC2 (t3.small)** — runs `distributor.py` in tmux. Polls Supabase every 10 s, spawns one `worker.py` Python subprocess per pending job. Plain venv — no Docker.
+- **Worker pipeline (M1, intentionally minimal):** `pending → downloading → transcribe → done`. Download via yt-dlp, ffmpeg → 64 kbps mono mp3, split into 10-min chunks, call OpenAI Whisper with `response_format='text'`, concatenate, write to `job_sessions.subtitle_txt_content`.
+
+**Out of scope in M1 (deferred to later milestones):** SRT/VTT outputs, LLM cleanup (block-combining / typo / semantic / proofread), human review (`*_reviewed` columns), error recovery, Stripe credits, custom domain, serverless distributor.
 
 ### Prerequisites
 
-#### Local tooling
+#### External accounts (for students to register, ramped per chapter)
 
-- Node.js 18+
-- Python 3.12+
-- Docker
-
-#### External accounts (for students to register before starting)
-
-8 accounts total. Aligned with the course modules so students only register what they need, when they need it.
+7 accounts total. Aligned with course modules so students only register what they need, when they need it.
 
 | # | Service | First needed in | Used for | Notes |
 |---|---|---|---|---|
 | 1 | **GitHub** | 2.1 入口網站 | Source control + Vercel/Lovable repo linking | Free; required for Vercel + Lovable integrations |
-| 2 | **Lovable** | 2.1 入口網站 | Generates the v1 homepage / landing scaffold from a one-line prompt | Free tier; mind the monthly generation cap before regenerating |
-| 3 | **Supabase** | 2.1 入口網站 | Postgres + auth + two storage buckets | Free tier: 500MB DB / 1GB storage |
+| 2 | **Lovable** | 2.1 入口網站 | Generates the v1 homepage / landing scaffold; converts Vite→Next.js in M1 | Free tier; mind the monthly generation cap before regenerating |
+| 3 | **Supabase** | 2.1 入口網站 | Postgres + auth | Free tier: 500MB DB / 1GB storage |
 | 4 | **Vercel** | 2.1 入口網站 | Hosts the Next.js app + API routes | Free tier OK for personal projects |
-| 5 | **OpenAI** | 2.2 影片摘要核心 | Whisper (transcription) + gpt-4o (typo + semantic) | Pay-as-you-go; preload credits |
-| 6 | **Anthropic** | 2.2 影片摘要核心 | Claude (block-combining, contextual proofreading) | Pay-as-you-go; preload credits |
-| 7 | **Stripe** | 2.3 點數制金流 | Checkout Sessions + webhook for credit purchases | Use Test Mode for the whole module. Taiwan accounts need company/business registration + bank account to leave Test Mode (3–7 business days). Submit application after 2.4 so it doesn't block this module. |
-| 8 | **AWS** | 2.4 綁網域 | Route 53 (DNS) in 2.4; Lambda + ECS Fargate + EventBridge in 2.5 | Credit card required. Same account covers both 2.4 and 2.5 — no second AWS account needed. |
+| 5 | **OpenAI** | 2.2 影片摘要核心 (M1) | Whisper (`whisper-1`) transcription | Pay-as-you-go; preload ~\$5; set a soft monthly cap |
+| 6 | **AWS** | 2.2 影片摘要核心 (M1) | One Ubuntu EC2 (t3.small) for the worker; Route 53 in M3; Lambda + ECS Fargate + EventBridge in M4 | Credit card required. Same account covers M1, M3, and M4 — no second AWS account needed. ~\$15/mo if EC2 left running; \$0 stopped. |
+| 7 | **Stripe** | 2.3 點數制金流 (M2) | Checkout Sessions + webhook for credit purchases | Use Test Mode for the whole module. Taiwan accounts need company/business registration + bank account to leave Test Mode (3–7 business days). Submit application after M3 (domain) so the live URL is ready. |
+
+> **Anthropic / Claude is NOT in this list.** The course's M1 deliberately stops at Whisper TXT output and skips the LLM cleanup pipeline (block-combining, typo check, semantic fix, contextual proofreading). If a future iteration adds those steps as an extension milestone, Anthropic gets added then.
 
 **Module-by-module registration ramp:**
 
-- **2.1 入口網站** — register 1–4 (GitHub, Lovable, Supabase, Vercel)
-- **2.2 影片摘要核心** — add 5–6 (OpenAI, Anthropic)
-- **2.3 點數制金流** — add 7 (Stripe)
-- **2.4 綁網域** — add 8 (AWS); also register a domain with a registrar (Namecheap / Cloudflare / GoDaddy, ~$10–15/year)
-- **2.5 雲端擴展** — no new accounts; reuse the AWS account from 2.4
+- **2.1 入口網站 (M0)** — register 1–4 (GitHub, Lovable, Supabase, Vercel).
+- **2.2 影片摘要核心 (M1)** — add 5–6 (OpenAI, AWS). The AWS account covers M1's EC2 plus M3's Route 53 and M4's Lambda+Fargate, so you only sign up once.
+- **2.3 點數制金流 (M2)** — add 7 (Stripe).
+- **2.4 綁網域 (M3)** — no new SaaS account; just buy a domain at a registrar (Namecheap / Cloudflare / GoDaddy, ~\$10–15/year). Use the AWS account from M1 for Route 53.
+- **2.5 雲端擴展 (M4, optional)** — no new accounts; reuse the AWS account from M1.
 
 **Marketing one-liner:** "報名前只要註冊 4 個帳號（GitHub、Lovable、Supabase、Vercel），其他帳號我會在課程裡帶你一個一個開。"
 
-### Running locally
+### Running M1 (high-level)
 
-1. **Web server**
-   ```bash
-   npm run dev
-   ```
+1. **Web app on Vercel** — Lovable converts M0's Vite SPA to Next.js 16; push to GitHub; Vercel auto-deploys.
+2. **Schema** — apply `supabase/migrations/<ts>_m1_jobs_and_sessions.sql` (or `mcp__supabase_remote__apply_migration` in Cowork mode).
+3. **`/upload` page + `/api/jobs` route handler** — Lovable prompt + an inline route handler the student copies into `app/api/jobs/route.ts`.
+4. **EC2 worker** — SSH in, `git pull`, `tmux new -s worker`, `./venv/bin/python distributor.py`. The distributor polls Supabase + spawns `worker.py` subprocesses.
 
-2. **Worker (distributor)**
-   ```bash
-   cd worker
-   venv/bin/python distributor.py
-   ```
+The full step-by-step lives in the `m1-ai-video-transcript` skill (with prerequisites in `m1-ai-video-transcript-prerequisites` and end-to-end verification in `m1-ai-video-transcript-checklist`).
 
-3. **Build Docker image** (one-time, or after changes to `worker.py`)
-   ```bash
-   cd worker
-   docker build -t subtitle-worker .
-   ```
+### Environment variables
 
-### Environment variables (`.env.local`)
+**Vercel + `.env.local` (web app):**
 
 | Variable | Description |
 |---|---|
 | `NEXT_PUBLIC_SUPABASE_URL` | Supabase project URL |
-| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Supabase publishable key |
-| `SUPABASE_SERVICE_KEY` | Supabase secret service key |
-| `OPENAI_API_KEY` | OpenAI API key (Whisper + ChatGPT) |
-| `ANTHROPIC_API_KEY` | Anthropic API key (Claude) |
+| `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` | Browser-safe publishable key (RLS-gated) |
+| `SUPABASE_SERVICE_KEY` | Server-only secret service-role key — never prefix with `NEXT_PUBLIC_` |
 
-### Deployment
+**EC2 `worker/.env`:**
 
-- **Web app**: `vercel --prod`
-- **Database migrations**: `supabase db push`
-- **Worker + Docker**: Run locally on your machine
+| Variable | Description |
+|---|---|
+| `SUPABASE_URL` | Same as `NEXT_PUBLIC_SUPABASE_URL` |
+| `SUPABASE_SERVICE_KEY` | Same as the web app's secret key |
+| `OPENAI_API_KEY` | OpenAI API key for Whisper |
 
-## Architecture (Milestone 2) — EC2 Deployment
-> 對應課程章節 **2.2 — 打造 AI 影片摘要核心功能**（後半段：把同一條 pipeline 搬上 EC2，讓它 24/7 跑）
+`worker/.env` must be in `.gitignore` before the first commit; both keys are catastrophic if leaked.
 
-```
-[User Browser] → [Vercel: Next.js app] → [Supabase DB (remote)]
-                                                ↑
-                          [AWS EC2 (t3.xlarge): distributor.py]
-                                ↓ polls every 10s
-                          [Docker containers on same EC2]
-                          (1 container per job, concurrent)
-```
-
-- **Remote Vercel** — Next.js web app (UI, API routes, auth)
-- **Remote Supabase** — Database, auth, storage
-- **AWS EC2** — `distributor.py` runs as a systemd service, polls Supabase for pending jobs, spawns Docker containers on the same machine
-- **Docker workers** — `worker.py` runs inside containers, one per job, handles the full pipeline
-- **Credit system** — Escrow-based: credits are reserved at download, deducted on completion, released on failure. Prevents overspending with concurrent jobs.
-
-### Key improvements over Milestone 1
-
-| | Milestone 1 | Milestone 2 |
-|---|---|---|
-| Worker location | Local machine | AWS EC2 |
-| Availability | Only when laptop is on | 24/7 |
-| Deployment | Manual SCP | CDK infrastructure as code |
-| Credit system | Basic deduction | Escrow-based (handles concurrency) |
-
-### Known scaling limitation
-
-When multiple jobs run concurrently, all Docker containers compete for the same EC2 CPU. During peak usage (3+ concurrent jobs), CPU utilization hits ~100%, causing:
-- Jobs stuck in transcription steps (ffmpeg/Whisper are CPU-intensive)
-- CPU credit exhaustion on burstable instances (t3 family)
-- SSH/SSM unresponsiveness
-
-This is the primary motivation for Milestone 3: moving workers to AWS Fargate where each job gets isolated compute.
-
-## Architecture (Milestone 3) — Add Stripe payment
+## Architecture (Milestone 2) — Add Stripe payment
 > 對應課程章節 **2.3 — 串接點數制金流，讓使用者用多少付多少**
 
 ```
@@ -220,7 +182,7 @@ This is the primary motivation for Milestone 3: moving workers to AWS Fargate wh
 - **Checkout session** — `app/api/credits/checkout/route.ts` looks up `credit_products.stripe_price_id`, creates a Stripe Checkout Session in `mode: 'payment'`, and stashes `{user_id, product_id, credits}` in `metadata`.
 - **Webhook** — `app/api/stripe/webhook/route.ts` verifies the signature, handles `checkout.session.completed` (credit the user) and `charge.refunded` (record refund, but do not deduct credits already spent).
 - **Ledger** — `credit_transactions` is append-only. Each purchase inserts one row with `stripe_payment_intent_id`; refunds update the same row with `refunded_at`, `stripe_refund_id`, `amount_refunded_cents`.
-- **Balance** — `profiles.credits_balance` is the running total. Workers deduct from it via the M2 escrow flow (`jobs.escrowed_credits`), so Stripe only touches the *inflow* side.
+- **Balance** — `profiles.credits_balance` is the running total. Workers deduct from it when a job completes (added in this milestone — M1 itself has no credit gating). Stripe only handles the *inflow* side.
 
 ### Step 1 — Model credits in Supabase
 
@@ -325,17 +287,17 @@ Verify in Supabase that `credit_transactions` got a row and `profiles.credits_ba
 3. Copy the endpoint's signing secret into Vercel env as `STRIPE_WEBHOOK_SECRET`, then redeploy (env changes don't apply to existing deployments).
 4. Switch live keys (`sk_live_...`, `pk_live_...`) and re-run the Step 2 relink migration against live `price_...` IDs.
 
-### Key additions over Milestone 2
+### Key additions over Milestone 1
 
-| | Milestone 2 | Milestone 3 |
+| | Milestone 1 | Milestone 2 |
 |---|---|---|
-| Credits inflow | Admin grants / signup bonus only | Self-serve Stripe Checkout |
+| Credits inflow | None — every transcribe is "free" against the OpenAI bill | Self-serve Stripe Checkout |
 | Payment verification | N/A | Signed webhook, idempotent on `payment_intent` |
 | Refund handling | N/A | Recorded without deducting spent credits |
-| Product catalog | Hard-coded | `credit_products` table linked to Stripe prices |
+| Product catalog | N/A | `credit_products` table linked to Stripe prices |
 
 
-## Architecture (Milestone 4) — Domain
+## Architecture (Milestone 3) — Domain
 > 對應課程章節 **2.4 — 綁定自己的網域，讓產品變成真正「自己的」**
 
 ```
@@ -345,9 +307,9 @@ Verify in Supabase that `credit_transactions` got a row and `profiles.credits_ba
                                                        已上線的 SaaS
 ```
 
-**目的：** 把 M0–M3 已經能跑的產品，從 `<your-project>.vercel.app` 換成自己的網域（例如 `yourdomain.com`）。這是學員第一次把產品「正式對外」的時刻。
+**目的：** 把 M0–M2 已經能跑的產品，從 `<your-project>.vercel.app` 換成自己的網域（例如 `yourdomain.com`）。這是學員第一次把產品「正式對外」的時刻。
 
-### 為什麼網域提前到 M4，而不是最後
+### 為什麼網域提前到 M3，而不是最後
 
 1. **沒有自己的網域，就沒辦法做行銷。** FB 廣告、SEO、Google Analytics、email 寄件人地址，全部需要正式網域。
 2. **Stripe 過審需要正式網域。** 台灣 Stripe 離開 Test Mode 要審核公司資訊，提交時要填產品網址 — `vercel.app` 子網域很容易被退件。
@@ -361,12 +323,12 @@ Verify in Supabase that `credit_transactions` got a row and `profiles.credits_ba
 4. 跟著 Vercel 顯示的 DNS records，回到 Route 53 / registrar 那邊新增（A record、CNAME 或 nameservers）
 5. 等 DNS propagation（通常 5 分鐘 ～ 幾小時），HTTPS 證書 Vercel 會自動處理
 
-### Prerequisites（M4 之前要先有）
+### Prerequisites（M3 之前要先有）
 
-- AWS 帳號（這一節用到 Route 53；同一個帳號到 M5 還會用到 Lambda + Fargate）
+- AWS 帳號（這一節用到 Route 53；M1 已經開好了，M4 還會用到 Lambda + Fargate）
 - 一個 domain registrar 帳號 + 買好的網域
 
-### 學員產出（M4 結束時）
+### 學員產出（M3 結束時）
 
 - 一個掛在 `yourdomain.com` 的正式產品
 - HTTPS 自動 ready
@@ -374,31 +336,33 @@ Verify in Supabase that `credit_transactions` got a row and `profiles.credits_ba
 
 ---
 
-## Architecture (Milestone 5, Optional) — Fully Serverless Scaling
+## Architecture (Milestone 4, Optional) — Fully Serverless Scaling
 > 對應課程章節 **2.5 — 營運成本歸零、營收無上限的雲端擴展**
 
 > **這一節是進階優化，不是必修。**
 >
-> M0–M4 結束時你的產品已經能上線、能收錢、有自己的網域 — 已經是一個會賺錢的 SaaS。M5 是當你流量真的長起來（例如同時跑 100+ 個影片）或想把伺服器成本壓到趨近於 0 的時候才做。
+> M0–M3 結束時你的產品已經能上線、能收錢、有自己的網域 — 已經是一個會賺錢的 SaaS。M4 是當你流量真的長起來（例如同時跑 100+ 個影片）或想把伺服器成本壓到趨近於 0 的時候才做。
 >
-> **什麼時候該做 M5：** 月帳單超過 \$50 / 同時跑 3+ 個 job 開始卡頓 / 想睡覺時也賺錢但不想付 always-on EC2 的錢。
+> **什麼時候該做 M4：** 月帳單超過 \$50 / 同時跑 3+ 個 job 開始卡頓 / 想睡覺時也賺錢但不想付 always-on EC2 的錢。
 >
-> **什麼時候不用做：** 還在驗證產品、月活躍使用者 < 100、覺得 AWS Lambda + Fargate 名詞看了就頭痛。M3 結束時的 EC2 / Vercel 部署模型完全可以撐你前 6 個月。
+> **什麼時候不用做：** 還在驗證產品、月活躍使用者 < 100、覺得 AWS Lambda + Fargate 名詞看了就頭痛。M2 結束時的 EC2 / Vercel 部署模型完全可以撐你前 6 個月。
 
-### Sub-step 1: EC2 Distributor + Fargate Workers
+### Sub-step 1: EC2 Distributor + Fargate Workers (transitional)
 
 ```
 [User Browser] → [Vercel: Next.js app] → [Supabase DB (remote)]
                                                 ↑
-                          [AWS EC2: distributor.py]
+                          [AWS EC2: distributor.py]   ← from M1
                                 ↓ ecs:RunTask
                           [AWS Fargate containers]
                           (1 task per job, isolated compute)
 ```
 
-- **EC2 distributor** — Polls Supabase, spawns Fargate tasks instead of local Docker containers
-- **Fargate workers** — Each job runs in its own Fargate task with dedicated CPU/memory. No resource contention.
-- **ECR** — Docker image pushed to Elastic Container Registry
+- **EC2 distributor** — same `distributor.py` from M1, now spawning Fargate tasks via `ecs:RunTask` instead of local Python subprocesses. The worker code moves into a Docker image pushed to ECR.
+- **Fargate workers** — each job runs in its own Fargate task with dedicated CPU/memory. No resource contention.
+- **ECR** — Docker image pushed to Elastic Container Registry.
+
+This sub-step solves the M1 scaling limit (single EC2 CPU shared by all concurrent jobs) without yet eliminating the EC2 itself. Useful as a stepping stone if you want to verify Fargate works before going fully serverless.
 
 ### Sub-step 2: Lambda Distributor + Fargate Workers (fully serverless)
 
@@ -447,9 +411,9 @@ Both fire every 1 minute via EventBridge (`subtitle-distributor-{stage}-schedule
 
 5. **Logging** — migrated from stdlib `logging` to AWS Lambda Powertools. Every log line auto-includes `service`, `function_name`, `function_arn`, `cold_start`, `function_request_id`, `xray_trace_id`, plus a custom `stage` field. Matches the logging convention used in the `orange-insider-0608` reference project.
 
-6. **EC2 retirement** — the Milestone 3 EC2 distributor instance is **stopped** (not terminated). CDK still creates it; removal is a follow-up cleanup commit.
+6. **EC2 retirement** — the M1 EC2 distributor instance is **stopped** (not terminated). CDK still creates it; removal is a follow-up cleanup commit.
 
-7. **Laptop `distributor.py`** — kept as a manual fallback. `launchctl bootout` stops it; the `/restart_subtitle_webserver` skill was updated so it no longer starts the laptop distributor by default (would race the Dev Lambda on the same Supabase). CLAUDE.md documents the "one distributor per Supabase at a time" rule and the switch-over commands.
+7. **EC2 `distributor.py`** — kept as a manual fallback (the same setup the student built in M1). `launchctl bootout` (or stopping tmux) takes it offline; the `/restart_subtitle_webserver` skill was updated so it no longer starts the laptop/EC2 distributor by default (would race the Dev Lambda on the same Supabase). CLAUDE.md documents the "one distributor per Supabase at a time" rule and the switch-over commands.
 
 #### Files touched
 
@@ -465,14 +429,14 @@ Both fire every 1 minute via EventBridge (`subtitle-distributor-{stage}-schedule
 
 Submitted a real job (#71) via `http://localhost:3005`. Dev Lambda tick at 21:04 found it, spawned Fargate task `571380c47b3642a8a68e1a158c157d13` in `subtitle-workers-dev`, wrote the ARN to `job_sessions.fargate_task_arn`. Next tick at 21:05 saw the ARN was set and correctly skipped. Job advanced through `downloading` → `transcribe_chatgpt` under the Fargate container.
 
-### Key improvements over Milestone 2
+### Key improvements over Milestone 1 (the EC2 baseline)
 
-| | Milestone 2 | Milestone 3 |
+| | Milestone 1 | Milestone 4 |
 |---|---|---|
-| Worker compute | Shared EC2 CPU | Isolated Fargate tasks |
+| Worker compute | Single EC2 CPU shared by all jobs | Isolated Fargate tasks (one per job) |
 | Scaling | Limited by EC2 instance size | Unlimited concurrent jobs |
-| CPU contention | 100% CPU with 3+ jobs | None (isolated per task) |
-| Distributor | Always-on EC2 (~$120/mo) | Lambda (~$1.50/mo) |
-| Cost when idle | EC2 running 24/7 | $0 (scales to zero) |
-| Ops burden | EC2 maintenance, SSH access | Fully serverless |
+| CPU contention | ~100% CPU with 3+ concurrent jobs | None (isolated per task) |
+| Distributor | Always-on EC2 (~\$15/mo for t3.small, more if upgraded) | Lambda (~\$1.50/mo at typical course volume) |
+| Cost when idle | EC2 running 24/7 unless manually stopped | \$0 (scales to zero) |
+| Ops burden | SSH + tmux + manual restart | Fully serverless |
 
