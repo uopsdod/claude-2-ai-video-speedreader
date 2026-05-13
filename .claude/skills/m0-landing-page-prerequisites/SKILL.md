@@ -1,9 +1,29 @@
 ---
 name: m0-landing-page-prerequisites
-description: One-time CLI + MCP setup the student needs BEFORE starting M0 (Course 2 Milestone 0). Installs `gh` / `vercel` / `supabase` CLIs and configures Vercel + Supabase MCP servers. Use when the student is about to start M0 for the first time, or when the `m0-landing-page` skill / `m0-landing-page-checklist` skill detects a missing CLI / MCP and refers the student back here.
+description: One-time CLI + MCP setup the student needs BEFORE starting M0 (Course 2 Milestone 0). Splits by execution mode — Cowork (MCP-only, no local shell) vs CLI (local terminal with `gh` / `vercel` / `supabase`). Use when the student is about to start M0 for the first time, or when the `m0-landing-page` / `m0-landing-page-checklist` skill detects a missing CLI / MCP and refers the student back here.
 ---
 
 # M0 Prerequisites — CLI + MCP Setup
+
+## Execution mode: Cowork vs CLI (read this first)
+
+Course 2 supports two execution environments. Confirm which one the student is using **before** doing anything else, and keep applying the right column for the rest of M0–M5.
+
+| | **Cowork mode** | **CLI mode** |
+|---|---|---|
+| What it is | Claude Code running in the hosted Cowork environment — no local shell, no `brew`/`npm install -g`, no local files | Claude Code running on the student's own laptop with a real terminal |
+| How to do GitHub | GitHub MCP if available, else GitHub web UI / Lovable's built-in Git panel | `gh` CLI |
+| How to do Vercel | `mcp__vercel__*` (required) | `mcp__vercel__*` preferred, `vercel` CLI fallback |
+| How to do Supabase | `mcp__supabase_remote__*` / `mcp__supabase_local__*` (required) | MCP preferred, `supabase` CLI fallback |
+| Interactive `*-login` browser flows | Skip — auth comes via the MCP install (OAuth in the Cowork UI) | Student runs them in their own terminal |
+| Sanity-check commands like `gh auth status`, `vercel whoami`, `supabase projects list` | **Skip** — they don't exist here. Verify by listing available MCP tools instead | Required at the end of this skill |
+
+**Ask the student up front:** 「你是用 Cowork 還是本機 CLI 跑 Claude Code？」
+
+- **Cowork** → skip everything in the "Install CLIs by OS" and "Login (student runs these)" sections. Go straight to "Install MCP servers" and the Cowork-mode verify step.
+- **CLI** → do the whole skill end-to-end.
+
+If the student is unsure, ask: "你在 Lovable 旁邊有沒有開一個 terminal 視窗、可以 `brew install` 東西？" Yes = CLI. No / "我都在瀏覽器裡" = Cowork.
 
 ## What this skill does
 
@@ -40,6 +60,8 @@ If no / partial → walk through the sections below for whatever is missing.
 **Install both MCPs (preferred) and CLIs (fallback)** so the checklist works regardless of which is available in a given session. CLIs are also useful in their own right (e.g. `vercel env add` is the easy way to add env vars).
 
 ## Install CLIs by OS
+
+> **Cowork mode: skip this entire section.** No local shell, nothing to install. Jump to "Install MCP servers" below.
 
 **Detecting the student's OS:** if you (Claude Code) don't already know, ask: "你用的是 macOS、Windows、還是 Linux？" Then paste the relevant block below.
 
@@ -82,6 +104,8 @@ curl -fsSL https://github.com/supabase/cli/releases/latest/download/supabase_lin
 
 ## Login (student runs these)
 
+> **Cowork mode: skip this entire section.** No CLIs to log in. The Cowork-installed MCP servers handle auth via the Cowork OAuth UI, not via terminal browser flows.
+
 After install, each CLI needs login. **The student must run these themselves** in their own terminal — these are interactive flows that open a browser, and you (Claude Code) cannot complete them inside a Bash tool call.
 
 Tell the student to run these one at a time (suggest using `! <command>` in the prompt to run inline in their Claude Code session):
@@ -107,6 +131,8 @@ After installing, **restart Claude Code** for the new MCP tools to appear in the
 
 ## Verify
 
+### CLI mode
+
 Once the student confirms all three logins and (optionally) the MCPs are installed, sanity-check with:
 
 ```bash
@@ -115,9 +141,17 @@ vercel whoami
 supabase projects list 2>/dev/null || echo "supabase CLI not logged in (OK if using MCP)"
 ```
 
-For MCP, ask the student to look at the available skills / tools in their Claude Code session — if they see `mcp__vercel__*` and `mcp__supabase_remote__*` (or `mcp__supabase_local__*`), MCPs are wired.
-
 All three CLIs should return account info. If any errors, walk through the failing one before continuing.
+
+### Cowork mode
+
+There are no CLI commands to run. Verify by listing the available MCP tools in the Cowork tool list:
+
+- `mcp__vercel__*` — at least one tool present → Vercel MCP wired
+- `mcp__supabase_remote__*` (or `mcp__supabase_local__*`) — at least one tool present → Supabase MCP wired
+- GitHub: if a GitHub MCP is installed in Cowork, look for its tools. If not, the student will use Lovable's Git panel + the GitHub web UI for the few GitHub steps in M0 (no `gh` CLI needed).
+
+If `mcp__vercel__*` or `mcp__supabase_*__*` tools are missing, the MCP isn't installed — the student needs to add it via the Cowork MCP/plugin UI (not via `~/.claude.json`, which doesn't apply in Cowork). Pause M0 until both are present.
 
 ## When done
 

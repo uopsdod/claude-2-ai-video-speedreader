@@ -11,6 +11,22 @@ When you (Claude Code) are guiding a student through Supabase operations, **appl
 
 ---
 
+## Execution mode: Cowork vs CLI
+
+Course 2 supports two execution environments. The hard rules below apply in both, but the **mechanics** differ.
+
+| Operation | CLI mode | Cowork mode |
+|---|---|---|
+| Apply a migration | `supabase db push` (after `supabase link`) | `mcp__supabase_remote__apply_migration` (or `mcp__supabase_local__apply_migration` for local) |
+| Inspect schema | `supabase db dump --schema public` / dashboard | `mcp__supabase_remote__list_tables`, `list_extensions`, `list_migrations` |
+| Run a one-off SELECT | `supabase db execute "SELECT ..."` | `mcp__supabase_remote__execute_sql` |
+| Get URL / publishable key | `supabase status --output json` | `mcp__supabase_remote__get_project_url`, `mcp__supabase_remote__get_publishable_keys` |
+| Local dev stack (`supabase start`, docker volumes) | Native | **Not available in Cowork** — use the remote/branch project, or `mcp__supabase_remote__create_branch` for an ephemeral isolated environment |
+
+**Cowork rule:** treat all `supabase` CLI invocations in this skill as **CLI-only**. Replace them with the equivalent MCP call from the table above. `supabase login`, `supabase link`, and `supabase start` have no Cowork equivalent — use the remote MCP directly (or a Supabase branch via MCP for isolated changes).
+
+---
+
 ## Hard rules
 
 ### Rule 1 — Never modify Supabase schema with direct SQL — always use migration files
@@ -22,7 +38,9 @@ When you (Claude Code) are guiding a student through Supabase operations, **appl
 **How to apply:** When a student / Lovable wants to change schema:
 1. Write a new migration file with a timestamp prefix (`YYYYMMDDHHMMSS_<short_description>.sql`).
 2. Commit it to git.
-3. Apply via `supabase db push` (or the equivalent CLI / MCP command).
+3. Apply it:
+   - **CLI mode:** `supabase db push`
+   - **Cowork mode:** `mcp__supabase_remote__apply_migration` (pass the migration name + SQL); for isolated testing, create a branch first via `mcp__supabase_remote__create_branch` and apply there.
 
 Read-only one-off queries (SELECT) are fine to run directly — only schema mutations are gated.
 
@@ -63,6 +81,10 @@ In this course, there are MCP tools for both: `mcp__supabase_local__*` and `mcp_
 
 ### Local development startup
 
+> **Cowork mode: skip this section entirely.** No docker, no `supabase start`. Use a remote Supabase branch (`mcp__supabase_remote__create_branch`) when you need an isolated test environment.
+
+**CLI mode:**
+
 ```bash
 SUPABASE_PROJECT_REF=<your-project-ref>     # e.g. aonhrhzuntjkskglqdwv
 supabase login
@@ -73,6 +95,8 @@ supabase start
 This boots the local dockerized Supabase stack. Use it for any non-trivial schema change before mirroring to remote.
 
 ### How to clean up local Supabase (when local state goes stale)
+
+> **CLI mode only** — Cowork has no local docker stack to clean.
 
 ```bash
 docker volume ls --filter label=com.supabase.cli.project=<your-project-name>
@@ -85,11 +109,14 @@ Then re-run `supabase start`. Useful when migrations get into a weird half-appli
 
 Supabase recently renamed the browser-safe key from "anon key" to **"publishable key"** (`sb_publishable_*`). They're the same role — RLS-gated, safe to ship in client code. Older docs / `supabase status` output may still call it `ANON_KEY`.
 
-```bash
-supabase status --output json
-```
+- **CLI mode:**
+  ```bash
+  supabase status --output json
+  ```
+  Extract `ANON_KEY` (legacy CLI output name) OR `PUBLISHABLE_KEY` (new) from the JSON — whichever is present.
+- **Cowork mode:** call `mcp__supabase_remote__get_publishable_keys` (or `mcp__supabase_local__get_publishable_keys`). Returns the same value without a CLI roundtrip.
 
-Extract `ANON_KEY` (legacy CLI output name) OR `PUBLISHABLE_KEY` (new) from the JSON — whichever is present. This value goes into your client env var, conventionally `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` or the legacy `NEXT_PUBLIC_SUPABASE_ANON_KEY` (either name works — it's just an env var name; pick one and apply consistently).
+This value goes into your client env var, conventionally `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` or the legacy `NEXT_PUBLIC_SUPABASE_ANON_KEY` (either name works — it's just an env var name; pick one and apply consistently).
 
 **Never confuse this with the secret / service_role key.** That one is server-only — exposing it in browser code = full bypass of RLS = total compromise.
 

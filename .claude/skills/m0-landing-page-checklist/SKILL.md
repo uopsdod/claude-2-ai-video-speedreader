@@ -11,6 +11,20 @@ Verifies the student has actually completed M0 — not just *thinks* they have. 
 
 **Run this AFTER `m0-landing-page` Step 6, or any time the student claims M0 is done.**
 
+## Execution mode: Cowork vs CLI (read this first)
+
+This checklist supports both execution modes — confirm which one the student is in before running anything. See `m0-landing-page-prerequisites` for the full mode table.
+
+| Section | CLI mode tool | Cowork mode equivalent |
+|---|---|---|
+| A — GitHub repo | `gh repo view` / `gh api` | GitHub MCP if installed; otherwise the GitHub web UI (student opens repo URL and confirms) |
+| B — Vercel deploy (HTTP checks) | `curl` | `mcp__vercel__*` deployment tools, OR ask student to open URL in browser and paste status |
+| C — Landing page contents | `curl ... | grep` | `mcp__playwright__browser_navigate` + `browser_snapshot` if available; otherwise student does the browser inspection and pastes back |
+| D — Two-way sync | `gh api repos/.../commits` | GitHub MCP / GitHub web UI commit timestamp check |
+| E — Supabase | `supabase` CLI fallback | `mcp__supabase_remote__*` (preferred in both modes) |
+
+In Cowork mode, every Bash block below is **CLI-only**. Use the equivalent above. Do not try to install `gh` / `curl` / `vercel` in Cowork — they aren't there.
+
 ## How to run
 
 **This skill is meant to be invoked directly by the student** (e.g. they type `驗收 M0` and the skill kicks in). You (Claude Code) **actively execute** each check — don't just describe how to verify; actually run the commands via the `Bash` tool, then report results.
@@ -26,7 +40,9 @@ Ask the student for these four URLs upfront:
 
 If any URL is missing, **stop**. The student hasn't actually finished M0.
 
-### Step 2: Preflight — verify CLI tools are installed + logged in
+### Step 2: Preflight — verify tools are available
+
+#### CLI mode
 
 Before running any checks, run this in one Bash call to inventory what's available:
 
@@ -35,6 +51,17 @@ echo "--- gh ---"   && gh --version && gh auth status 2>&1 | head -3
 echo "--- vercel ---" && vercel --version && vercel whoami 2>&1
 echo "--- supabase ---" && supabase --version 2>&1 || echo "supabase CLI not installed (OK if Supabase MCP is available)"
 ```
+
+#### Cowork mode
+
+Skip the Bash inventory — there's no shell. Instead, scan the available tool list for:
+
+- `mcp__vercel__*` — required for Section B
+- `mcp__supabase_remote__*` (or `_local__*`) — required for Section E
+- GitHub MCP tools (if installed) — used for Section A / D; otherwise fall back to the GitHub web UI
+- `mcp__playwright__browser_*` — optional, lets you do Section B/C/E4 without bothering the student
+
+If `mcp__vercel__*` or `mcp__supabase_*__*` is missing, stop and refer the student back to `m0-landing-page-prerequisites`.
 
 **Interpret the output:**
 
@@ -58,7 +85,14 @@ Same shape for `vercel` and `supabase`.
 
 ### Step 3: Run the checklist below
 
-For each item: **don't take the student's word for it — verify with a Bash command or MCP tool**. Report results as a table at the end. Each row is one check, with: ✅ pass, ❌ fail, ⚠️ couldn't verify.
+For each item: **don't take the student's word for it — verify with a Bash command (CLI mode) or MCP tool (Cowork mode)**. Report results as a table at the end. Each row is one check, with: ✅ pass, ❌ fail, ⚠️ couldn't verify.
+
+The checklist tables below show **CLI-mode commands** as the default. For each row, the Cowork-mode equivalent is:
+
+- `gh` / `gh api` → GitHub MCP tool, or open the URL in the browser and have the student paste back what they see
+- `curl` → `mcp__playwright__browser_navigate` + `browser_snapshot`, or student paste-back
+- `vercel env ls` → `mcp__vercel__*` env-listing tool, or student paste-back from Vercel dashboard
+- `supabase` CLI → `mcp__supabase_remote__*` (already preferred in both modes)
 
 ---
 
@@ -125,14 +159,14 @@ E0 + E1 cover the first; E2–E4 cover the second.
 | # | Check | How to verify |
 |---|---|---|
 | E0 | Student has a Supabase organization under their own account | **Active verification (prefer MCP):** Call `mcp__supabase_remote__get_project_url` or any `mcp__supabase_remote__*` tool — if it returns successfully, the MCP is authenticated to the student's Supabase account, which means an org exists. <br>**Fallback (no MCP):** ask the student to run `supabase orgs list` (requires `supabase login` first) and paste the output. Should show at least one org. <br>**Last resort (no CLI either):** ask the student to open https://supabase.com/dashboard and confirm they see at least one organization. |
-| E1 | Supabase project `video-speed-reader` (or similar) exists inside the student's own org and matches the URL the student gave | **Active verification (prefer MCP):** Call `mcp__supabase_remote__list_tables` or similar — returns a project context. Cross-reference the project ref in the MCP output against the `<ref>` in the student-supplied Supabase URL. They must match. <br>**Fallback (CLI):** `supabase projects list` — should include a row whose ref matches the supplied URL. <br>**If the URL's project ref isn't in the student's account at all**, the Lovable connection went to a shared/demo space. Re-do `m0-landing-page` Step 1.B and pick "create new" explicitly inside the student's org. |
+| E1 | Supabase project `video-speed-reader` (or similar) exists inside the student's own org and matches the URL the student gave | **Active verification (prefer MCP):** Call `mcp__supabase_remote__list_tables` or similar — returns a project context. Cross-reference the project ref in the MCP output against the `<ref>` in the student-supplied Supabase URL. They must match. <br>**Fallback (CLI):** `supabase projects list` — should include a row whose ref matches the supplied URL. <br>**If the URL's project ref isn't in the student's account at all**, the Lovable connection went to a shared/demo space. Re-do `m0-landing-page` Step 5.A and pick "create new" explicitly inside the student's org. |
 | E2 | Supabase project responds | Hit `curl -sI https://<ref>.supabase.co/rest/v1/` — should return HTTP 401 (without API key) or 200 (some versions). Anything else (DNS error, 5xx) means the project is paused / deleted. |
 | E3 | Vercel deploy has Supabase env vars set | **Active verification (prefer Vercel MCP):** if a `mcp__vercel__*` tool for listing env vars is available, call it and grep for `SUPABASE`. <br>**Fallback (CLI):** `cd <project-dir> && vercel env ls` — should list at least one var matching `*SUPABASE_URL*` and one matching either `*SUPABASE_PUBLISHABLE_KEY*` (new Supabase naming) OR `*SUPABASE_ANON_KEY*` (legacy naming; still valid). <br>**Last resort:** ask the student to go to Vercel project → Settings → Environment Variables and paste the variable names back. <br>If missing, this is the #1 cause of "auth works in Lovable preview but not on Vercel." |
 | E4 | Sign-up + sign-in actually works on the Vercel deploy + user lands in Supabase `auth.users` | **Hybrid: student does the browser test, you verify the side effect.** Tell the student: "請打開 `<vercel-url>` (用 incognito 視窗)，點 Sign Up，用一個測試 email 註冊（例如 `test-m0-<時間戳>@example.com`），登入後應該看到 `/app` 頁面顯示 'Hi {email}'。完成跟我說。" <br>When they confirm, **verify the user actually landed in Supabase**: use `mcp__supabase_remote__execute_sql` to run `SELECT email, created_at FROM auth.users ORDER BY created_at DESC LIMIT 5` — the test email should appear at the top with a `created_at` within the last few minutes. <br>If MCP unavailable, fall back to `supabase db execute` or ask student to look at Supabase dashboard → Authentication → Users. |
 
 If E0 fails: student hasn't signed up for Supabase. Stop everything, send them to register, then resume.
 
-If E1 fails: Lovable connected to a project that's not in the student's org. The project will eventually break (Lovable demo projects expire / get rate-limited). Re-do Step 1.B explicitly creating a new project inside the student's own org.
+If E1 fails: Lovable connected to a project that's not in the student's org. The project will eventually break (Lovable demo projects expire / get rate-limited). Re-do Step 5.A explicitly creating a new project inside the student's own org.
 
 If E2 fails: the project URL is dead. Could be paused (free tier auto-pauses after a week of inactivity — student needs to un-pause from the dashboard), or could be a typo in the URL.
 

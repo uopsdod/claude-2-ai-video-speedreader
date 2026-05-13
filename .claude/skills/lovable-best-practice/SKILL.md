@@ -14,6 +14,20 @@ When you (Claude Code) are guiding a student through Lovable steps, **apply thes
 
 ---
 
+## Execution mode: Cowork vs CLI
+
+Course 2 supports two execution environments. Lovable itself works the same way in both (it's a hosted web app), but the **verification + git steps around Lovable** differ.
+
+| Operation | CLI mode | Cowork mode |
+|---|---|---|
+| Confirm a Lovable iteration synced to GitHub | `gh api repos/<owner>/<repo>/commits --jq '.[0].commit.message'` | GitHub MCP (if installed), Lovable's built-in Git panel, or open `https://github.com/<owner>/<repo>/commits` in a browser |
+| PII grep over changed files (Rule 3) | `grep -rE '@(gmail|yahoo|hotmail|outlook)\.com' .` locally | No local checkout — review the Lovable diff in the Lovable UI before saving, or open the diff in GitHub web after it pushes |
+| Edit Lovable's generated files directly | Use Claude Code Edit/Write on local clone | Edit through Lovable's own editor; there's no local working copy to patch |
+
+The **hard rules** (Rules 1–4) apply identically in both modes — only the verification mechanics change. Wherever this skill says `gh ...`, treat that as **CLI-only** and substitute the Cowork equivalent above.
+
+---
+
 ## Hard rules (apply to every Lovable session in this course)
 
 These came from real incidents on a multi-page Lovable + Supabase project. They become relevant the moment the student adds Supabase in M1 — but state them in M0 so the student already has the right mental model when they get there.
@@ -52,7 +66,11 @@ This rule doesn't apply in M0 (no Supabase yet), but say it once during M0 so th
 
 **Why:** Lovable will sometimes auto-fill demo data with whatever email is signed into your account, or copy a real-looking email it saw in your prompt. Once that hits the GitHub repo, it's permanently in git history — even if you delete the file, anyone with a clone has it. For a course product you'll eventually share publicly, this is a compliance and trust issue.
 
-**How to apply:** Before any commit triggered by Lovable, do a quick `grep -rE '@(gmail|yahoo|hotmail|outlook)\.com' .` on changed files. If it finds real-looking emails, swap to `example.com` placeholders first.
+**How to apply:** Before any commit triggered by Lovable, do a PII scan on changed files:
+- **CLI mode:** `grep -rE '@(gmail|yahoo|hotmail|outlook)\.com' .` on the local checkout.
+- **Cowork mode:** there's no local checkout — review the diff in Lovable's UI before saving, or open the just-pushed commit in the GitHub web UI and scan the diff there.
+
+If it finds real-looking emails, swap to `example.com` placeholders first.
 
 ---
 
@@ -92,7 +110,9 @@ Lovable's free tier limits you to a small number of generations per day (subject
 
 Lovable two-way syncs with GitHub once connected. But if Lovable's next generation overwrites something you liked, you want a git commit to roll back to.
 
-**Habit:** after every Lovable iteration the student is happy with, the GitHub repo should have a commit. Lovable usually does this automatically once connected, but verify via `gh api repos/<owner>/<repo>/commits --jq '.[0].commit.message'` — confirm the latest commit message matches the iteration.
+**Habit:** after every Lovable iteration the student is happy with, the GitHub repo should have a commit. Lovable usually does this automatically once connected, but verify the latest commit message matches the iteration:
+- **CLI mode:** `gh api repos/<owner>/<repo>/commits --jq '.[0].commit.message'`
+- **Cowork mode:** open `https://github.com/<owner>/<repo>/commits` in the browser, or use the GitHub MCP if installed; Lovable's own Git panel also shows the sync status.
 
 ---
 

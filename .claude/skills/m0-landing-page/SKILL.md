@@ -29,6 +29,15 @@ Trigger phrases:
 
 Do NOT load this skill for M1–M5 — they have their own skills.
 
+## Execution mode: Cowork vs CLI (confirm before Step 1)
+
+Before starting, ask the student: 「你是用 Cowork 還是本機 CLI 跑 Claude Code？」
+
+- **Cowork mode** — no local shell. Every "verify with `gh ...` / `vercel ...`" line below is **CLI-only** — replace with the MCP / browser equivalent noted in the same step. CLI verification commands inside this skill are advisory in Cowork; if the equivalent MCP call returns the same answer, that's enough.
+- **CLI mode** — the Bash commands in this skill all apply directly.
+
+See `m0-landing-page-prerequisites` for the full Cowork-vs-CLI mode table. The rest of this skill assumes you've picked a mode and will translate accordingly.
+
 ## Required external accounts
 
 Before starting, the student must have:
@@ -50,38 +59,29 @@ M0 builds **Video Speed Reader** — the exact same product as this course's ref
 
 The skill is conversational — you (Claude Code) drive the student through 6 steps. Don't dump all the steps at once. After each step, **wait for confirmation** before moving to the next.
 
-> **Before Step 1:** confirm the student has done the one-time CLI + MCP setup. If not, **load the `m0-landing-page-prerequisites` skill first** and walk them through it. The checklist at the end of M0 will need `gh` / `vercel` / `supabase` CLIs (and ideally Vercel + Supabase MCPs) — if they're missing, the verification will stall at the worst moment. A quick sanity check before starting:
+> **Before Step 1:** confirm the student has done the one-time CLI + MCP setup. If not, **load the `m0-landing-page-prerequisites` skill first** and walk them through it.
 >
-> ```bash
-> gh auth status && vercel whoami && supabase projects list 2>/dev/null | head -1
-> ```
->
-> If any of those error out, switch to `m0-landing-page-prerequisites` skill and come back.
+> - **CLI mode sanity check:** the checklist at the end of M0 will need `gh` / `vercel` / `supabase` CLIs (and ideally Vercel + Supabase MCPs).
+>   ```bash
+>   gh auth status && vercel whoami && supabase projects list 2>/dev/null | head -1
+>   ```
+>   If any of those error out, switch to `m0-landing-page-prerequisites` skill and come back.
+> - **Cowork mode sanity check:** confirm `mcp__vercel__*` and `mcp__supabase_remote__*` (or `_local__*`) tools are available in this session. If either is missing, switch to `m0-landing-page-prerequisites` and install the MCP via the Cowork MCP/plugin UI.
 
-### Step 1 — Create the Lovable project AND a separate Supabase project (do not connect them yet)
+### Step 1 — Create the Lovable project (that's it for setup)
 
-This step has two parallel sub-steps. The student creates the Lovable project AND a Supabase project, but they are NOT wired together yet. Lovable's v1 will auto-use **Lovable Cloud** (Lovable's own managed Supabase) as the backend; we'll switch over to the student's own Supabase project in **Step 5** as a clean one-shot operation. Connecting Supabase to Lovable now would just create a half-state where the student thinks auth runs against their project but it actually runs against Lovable Cloud.
-
-**Order verified by walking through Lovable:** create a Lovable project → create a Supabase project in parallel (not connected to Lovable) → give the full Video Speed Reader prompt (auth runs on Lovable Cloud) → connect GitHub → deploy to Vercel → swap backend to the student's own Supabase in one go.
+Just one thing: create a Lovable project. No Supabase setup, no GitHub setup, no Vercel setup yet. The goal of M0 is to **get the student to a working signed-in product as fast as possible** — every account-creation step delays that "first online page" moment. We use Lovable's defaults (Lovable Cloud as the auth backend) for v1, and migrate to the student's own infra in two clean cleanups later (Step 4: move to Vercel, Step 5: move auth to the student's own Supabase project).
 
 Tell the student (verbatim, with the exact menu paths):
 
-> **A. 建立 Lovable project**
 > 1. 到 https://lovable.dev/，登入後從 dashboard 點 **+ New project**（或類似的「建立新專案」按鈕）
 > 2. 如果 Lovable 要求你打一個初始 prompt，輸入最簡單的 placeholder：`Create a blank project for a SaaS product called Video Speed Reader.` — 這只是讓你進到專案 workspace，**不要在這一步就貼正式 prompt**
 > 3. 等 Lovable 跑完初始 scaffold（30秒到一分鐘）
 > 4. 把 Lovable project URL 貼回來給我（格式 `https://lovable.dev/projects/<id>`）
->
-> **B. 在 Supabase dashboard 建一個 project（不要在 Lovable 連）**
-> 1. 到 https://supabase.com/dashboard
-> 2. 點 **New project**（在你的 org 底下）
-> 3. Name 填 `video-speed-reader`，region 選離你近的，database password 隨意（之後 M1 才會用到）
-> 4. 等 Supabase 把 project 啟動好（通常 1–2 分鐘）
-> 5. 把 Supabase project URL 貼回來給我（格式 `https://<ref>.supabase.co`）
->
-> ⚠️ **不要**在 Lovable 點 Connect Supabase。我們現在故意讓 Lovable 跑在它預設的 Lovable Cloud 上，等 Step 5 再一次性切換到你的 Supabase project。如果在這一步就連 Lovable + Supabase，Lovable 的 v1 還是會用 Lovable Cloud，反而會產生混淆狀態。
 
-**Verify before moving on:** the student must have given you both URLs (Lovable project URL + Supabase project URL) before Step 2.
+⚠️ **不要在這一步點 Connect Supabase / Connect GitHub。** Lovable 的 v1 會用 Lovable Cloud 當 auth backend（這是預設、最低摩擦的設定）。GitHub 我們在 Step 3 才連，Supabase migration 留到 Step 5 一次清乾淨。
+
+**Verify before moving on:** the student must have given you the Lovable project URL before Step 2.
 
 > **Note for Claude Code:** If the student asks about modifying the Supabase schema during this step (e.g. "should I add a `profiles` table?"), say **no — M0 only uses the default `auth.users` table that Supabase auto-creates**. Custom tables come in M1. Also if the student insists on connecting Supabase to Lovable now, gently push back — explain Lovable Cloud will still take precedence and we'll do the swap cleanly in Step 5.
 
@@ -124,9 +124,11 @@ Out of scope for this v1: video upload widget, transcript display, payment, cust
 
 Tell the student verbatim:
 
-> 「請複製這段 prompt 貼到 Lovable 的 prompt 框，按送出。Lovable 大概 2-3 分鐘會跑完。跑完之後在 Lovable preview 試一次 sign up + sign in，確認真的能用、登入後會跳到 /app 顯示 "Hi {你的 email}"。確認 OK 再跟我說。」
+> 「請複製這段 prompt 貼到 Lovable 的 prompt 框，按送出。Lovable 大概 2-3 分鐘會跑完。跑完之後在 Lovable preview 試一次 sign up + sign in — 確認真的能用、登入後會跳到 /app 顯示 "Hi {你的 email}"。**這就是你的第一個可登入的 SaaS 原型，恭喜🎉。**確認 OK 再跟我說。」
 
 **Verify before moving on:** the student must confirm sign-up + sign-in works in the Lovable preview. Debug here rather than waiting for Vercel re-deploys — Lovable iterates faster.
+
+> **Heads up to give the student after they confirm v1 works:** 「v1 跑起來了！接下來 Step 3、4、5 是三個 cleanup：把 code 推到你自己的 GitHub、部署到你自己的 Vercel 網域、最後把 auth backend 從 Lovable Cloud 切到你自己的 Supabase project。每一步都會讓產品更接近『你完全擁有』的狀態。」
 
 ### Step 3 — Connect Lovable to GitHub
 
@@ -141,7 +143,9 @@ Tell the student (verbatim, with the exact menu path):
 > 4. Lovable 會自動建一個 GitHub repo（名字通常會是 `video-speed-reader` 或 `video-speed-reader-xyz`）
 > 5. 把 GitHub repo URL 貼回來給我
 
-**Verify before moving on:** the GitHub repo URL contains `video-speed-reader` or similar. Quickly confirm it really has the code by running `gh repo view <owner>/<repo>` — should show recent commits.
+**Verify before moving on:** the GitHub repo URL contains `video-speed-reader` or similar. Quickly confirm it really has the code:
+- **CLI mode:** `gh repo view <owner>/<repo>` — should show recent commits.
+- **Cowork mode:** open the GitHub repo URL in the browser and confirm the file tree + a recent commit; or, if a GitHub MCP is installed in Cowork, call its repo-view / list-commits tool. No `gh` needed.
 
 ### Step 4 — Deploy to Vercel
 
@@ -177,7 +181,9 @@ After this conversion, Vercel will auto-detect Framework Preset = Vite and the s
 **Verify before moving on:**
 - `vite.config.ts` no longer imports `@lovable.dev/vite-tanstack-config`
 - Sign-up / sign-in still works in the Lovable preview after the conversion
-- The conversion commit has synced to GitHub (`gh api repos/<owner>/<repo>/commits --jq '.[0].commit.message'` should show a recent commit)
+- The conversion commit has synced to GitHub.
+  - **CLI mode:** `gh api repos/<owner>/<repo>/commits --jq '.[0].commit.message'` should show a recent commit
+  - **Cowork mode:** open `https://github.com/<owner>/<repo>/commits` in the browser and confirm the latest commit message mentions the Vite SPA conversion (or use a GitHub MCP if installed)
 
 If sign-up broke during the conversion, re-prompt Lovable: 「Sign-up flow broke after the Vite SPA conversion. Restore the Supabase auth flow using the already-connected `@supabase/supabase-js` client. Keep the project as a pure Vite SPA — no SSR, no TanStack Start.」
 
@@ -197,24 +203,26 @@ Tell the student:
 
 Ask the student to paste the Vercel deploy URL back here. Then test the sign-up / sign-in flow on the Vercel URL too — confirm it still works after deploy (env var typos are the #1 cause of "works in Lovable preview but broken on Vercel").
 
-> **Heads up — auth right now is on Lovable Cloud, not the student's own Supabase.** Even though Step 1.B "connected Supabase," Lovable's v1 actually uses its **Lovable Cloud** managed backend by default (a Lovable-owned Supabase project, not the one in the student's org). Test users from sign-up will land in Lovable Cloud, NOT in `auth.users` of the student's own Supabase project. We fix this in Step 5 before the final checklist — otherwise checklist E1/E4 will fail because the test user won't appear in the student's Supabase dashboard.
+> **Heads up — auth right now is on Lovable Cloud, not a Supabase project the student owns.** Lovable's v1 uses its **Lovable Cloud** managed backend by default (a Lovable-owned Supabase project). Sign-ups go there, NOT to a Supabase project in the student's org. We fix this in Step 5 (the student will create their own Supabase project there) — otherwise checklist E1/E4 will fail because the test user won't appear in the student's own Supabase dashboard.
 
 ### Step 5 — Switch backend from Lovable Cloud to the student's own Supabase
 
-Until now, sign-up / sign-in works — but the users are stored in **Lovable Cloud** (Lovable's managed backend), not the Supabase project the student created in Step 1.B. We need to repoint Lovable at the student's own Supabase before M1 can do anything meaningful (M1 will write custom tables to a Supabase the student doesn't control = bad).
+Until now, sign-up / sign-in works — but the users are stored in **Lovable Cloud** (Lovable's managed backend). We need to switch to a Supabase project the student owns before M1 can do anything meaningful (M1 will write custom tables, and writing them to a Supabase the student doesn't control = bad).
 
 Confirm with the student first:
 
-> 「現在 sign up / sign in 雖然能跑，但使用者其實是存在 Lovable Cloud（Lovable 自己的 Supabase），不是你 Step 1.B 連的那個 Supabase project。我們現在要切過去你自己的 Supabase。」
+> 「現在 sign up / sign in 雖然能跑，但使用者其實是存在 Lovable Cloud（Lovable 自己的 Supabase），不是你自己的 Supabase project。Lovable Cloud 是 Lovable 提供的便利預設、但你不擁有它（無法直接從 dashboard 看使用者、無法跑 SQL、無法管 schema）。現在第二個 cleanup：把 auth backend 切到你自己的 Supabase。」
 
-#### Step 5.A — Have the student grab their own Supabase project's URL + publishable key
+#### Step 5.A — Create the student's own Supabase project and grab URL + publishable key
 
-Tell the student:
+This is the first time the student needs Supabase dashboard. Tell them:
 
-> 1. 到 https://supabase.com/dashboard
-> 2. 點進 Step 1.B 建的 `video-speed-reader` project
-> 3. 左邊 sidebar → **Project Settings** → **API Keys**（新版 Supabase）或 **API**（舊版）
-> 4. 複製這兩個值貼回來給我：
+> 1. 到 https://supabase.com/dashboard，登入（你在 prerequisites 已經註冊好 Supabase 帳號了）
+> 2. 點 **New project**（在你自己的 org 底下；Supabase 註冊時會自動建一個 org）
+> 3. Name 填 `video-speed-reader`，region 選離你近的，database password 隨意（用 password manager 生一組存起來、之後 M1 才會真的需要）
+> 4. 點 **Create new project**，等 ~1-2 分鐘 Supabase 把 project 啟動好
+> 5. Project 啟動完後，左邊 sidebar → **Project Settings** → **API Keys**（新版 Supabase）或 **API**（舊版）
+> 6. 複製這兩個值貼回來給我：
 >    - **Project URL**（格式 `https://<ref>.supabase.co`）
 >    - **Publishable key**（開頭是 `sb_publishable_...`）
 >      - 如果 dashboard 還用舊版命名，這個欄位可能標 "anon public" — 是同一個 key、可以放心用。

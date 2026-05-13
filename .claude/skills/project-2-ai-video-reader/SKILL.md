@@ -2,6 +2,7 @@
 name: project-2-ai-video-reader
 description: Show the milestone architecture progression for the Claude Code Course 2 (Building a SaaS with Claude Code). Covers M0 (Lovable landing page) → M1 (local dev) → M2 (EC2) → M3 (Stripe) → M4 (domain) → M5 (Lambda + Fargate serverless), mapped to course chapters 2.1–2.5, including required external accounts per milestone. Use when the user asks about the Course 2 architecture, milestone progression, which accounts to register for which chapter, or how the subtitle-manager stack evolved.
 ---
+
 Show the milestone architecture progression for the Claude Code Course 2 (Building a SaaS with Claude Code).
 
 ## Milestone ↔ 課程章節對應
