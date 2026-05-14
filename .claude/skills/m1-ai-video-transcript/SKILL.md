@@ -49,7 +49,7 @@ If 4 or 5 is missing, **stop and load `m1-ai-video-transcript-prerequisites` fir
 
 ## Execution mode (single path — Claude Code in the repo)
 
-The M1-prerequisites setup already cloned the student's GitHub repo into Claude Code's project workspace via the GitHub Connector and verified that **edit → commit → push → Vercel auto-deploy** works end-to-end. M1 just keeps using that same loop — all code edits go through Claude Code's `Edit`/`Write` directly on the cloned repo, never through a third-party visual editor.
+By the time the student starts M1, `m0-landing-page-checklist` Section F has already verified that the GitHub repo is cloned into this Claude Code project workspace, the GitHub PAT can push, and that push triggers a Vercel re-deploy. M1 just keeps using that same loop — all code edits go through Claude Code's `Edit`/`Write` directly on the cloned repo, never through a third-party visual editor.
 
 | Operation | How |
 |---|---|
@@ -62,7 +62,7 @@ The M1-prerequisites setup already cloned the student's GitHub repo into Claude 
 
 **There is no SSH path** — M1 prereq stood up an SSM-managed EC2 specifically so we don't need one.
 
-If `git clone` / `git push` is not yet working in this workspace, **stop** and walk the student back through `project-ai-video-reader-m0-local-setup-and-checklist` (specifically the GitHub Personal Access Token step) before continuing.
+If `git clone` / `git push` is not yet working in this workspace, **stop** and run `m0-landing-page-checklist` Section F. If F1–F3 fail, walk the student back through `project-ai-video-reader-m0-local-setup-and-checklist` (specifically the GitHub Personal Access Token step) before continuing.
 
 ## How the code is organized + how it deploys
 
