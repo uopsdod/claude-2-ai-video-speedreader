@@ -103,18 +103,15 @@ The full update loop, from "I edited `worker.py`" to "the new code is running on
 
 1. **Author** the code locally — edit in the cloned repo via Claude Code (`Edit`/`Write`) or your editor.
 2. **Push** to GitHub: `git push origin main`.
-3. **Pull on the EC2** via Cowork — *one* MCP call:
+3. **Pull on the EC2** via Cowork — *one* MCP call (note: JSON form, not shorthand — see Step 6 gotchas):
    ```
    call_aws ssm send-command --instance-ids "$INSTANCE_ID" --document-name AWS-RunShellScript \
-     --parameters 'commands=[
-       "sudo -u ubuntu bash -c \"cd /home/ubuntu/app && git pull\"",
-       "sudo -u ubuntu bash -c \"cd /home/ubuntu/app/worker && ./venv/bin/pip install -r requirements.txt\""
-     ]'
+     --parameters '{"commands":["sudo -u ubuntu bash -c \"cd /home/ubuntu/app && git pull\"","sudo -u ubuntu bash -c \"cd /home/ubuntu/app/worker && ./venv/bin/pip install -r requirements.txt\""]}'
    ```
 4. **Restart the systemd service** — *one more* MCP call:
    ```
    call_aws ssm send-command --instance-ids "$INSTANCE_ID" --document-name AWS-RunShellScript \
-     --parameters 'commands=["sudo systemctl restart m1-distributor.service"]'
+     --parameters '{"commands":["sudo systemctl restart m1-distributor.service"]}'
    ```
 
 That's the entire deploy. No `scp`, no `ssh`, no Dockerfile, no GitHub Actions workflow, no CodeDeploy.
@@ -158,37 +155,98 @@ The skill is conversational — drive the student through 7 steps. Don't dump al
 
 M0 leaves the student on a Vite SPA, already cloned into this Claude Code project workspace via the GitHub Connector. M1's API route (`/api/jobs`) needs Next.js route handlers, which Vite doesn't have. We convert it by having Claude Code edit the cloned repo directly, then `git push` to GitHub so Vercel re-deploys.
 
+#### Step 1 ground rules (read these before running the prompt)
+
+These are the things that broke for past students. Internalize them or the deploy will fail in confusing ways.
+
+1. **Do the conversion as ONE atomic commit. Do not "stage" it across two commits.**
+   Vercel auto-detects the framework from *file presence*, not from `package.json`. The moment you push a commit that contains `middleware.ts` or `next.config.mjs`, Vercel switches that deploy to Next.js — even if `package.json` still has Vite. Mixed states fail to build (Next.js tries to bundle `middleware` without `@supabase/ssr` installed, or Vite chokes on a `postcss.config.*` that references packages it doesn't have yet). Everything in this step goes into one commit.
+
+2. **Preserve the M0 design verbatim — do not regenerate "a dark theme".**
+   The student may have already re-themed M0 (different palette, serif fonts, etc.) before starting M1. Before writing `app/globals.css`, Claude Code must **read `src/main.tsx` (or `src/App.tsx`) to find the actual stylesheet import path** (Lovable templates use `src/styles.css`, not `src/index.css`), then port that file verbatim into `app/globals.css`. Do not invent a stylesheet from a generic "dark theme" assumption.
+
+3. **Keep Supabase helpers under `src/lib/` to match the existing tsconfig alias.**
+   Lovable templates set `"paths": { "@/*": ["./src/*"] }` and ship `src/lib/utils.ts` (the shadcn `cn` helper). Put the new files at `src/lib/supabase/client.ts` and `src/lib/supabase/server.ts` so imports stay consistent as `@/lib/supabase/...` alongside `@/lib/utils`. Do NOT create a project-root `lib/`.
+
+4. **`cookies()` is async in Next.js 15+.**
+   `import { cookies } from 'next/headers'` returns a `Promise<ReadonlyRequestCookies>` since Next.js 15. Every callsite — including the one inside `src/lib/supabase/server.ts` — must `await cookies()`. Calling it synchronously is a type error.
+
+5. **Tailwind 4 packages change in the same commit, or not at all.**
+   Lovable's M0 uses Tailwind 4 via the `@tailwindcss/vite` plugin. Next.js needs `@tailwindcss/postcss` instead, configured via `postcss.config.mjs`. Vite auto-discovers any `postcss.config.*` at the project root, so adding that file *before* the dep swap crashes Vite's CSS pipeline. The dep swap (`package.json`), the new config (`postcss.config.mjs`), and removing `@tailwindcss/vite` from `vite.config.ts` (which itself gets deleted) all land in the single commit above.
+
+6. **`next build` runs `tsc --noEmit` + ESLint by default. M0's Vite build does not.**
+   The Lovable M0 scaffold has type errors that `vite build` happily ignores. To preserve M0's "build doesn't gate on types" property — which is what lets you ship fast in this course — ship a `next.config.mjs` with both checks disabled at build time. Type errors still surface in the editor; they just don't block deploy.
+
+#### Run the conversion prompt
+
 Tell the student verbatim:
 
-> 「M0 跑出來的是 Vite SPA。M1 要加 server-side API route（讓使用者送出影片時，後端能驗證身份、寫 Supabase），這在純 Vite 做不到 — 我們得轉成 Next.js 16。把下面這個 prompt 完整貼進來，我會直接改你 repo 裡的檔案，然後 push 上 GitHub。」
+> 「M0 跑出來的是 Vite SPA。M1 要加 server-side API route（讓使用者送出影片時，後端能驗證身份、寫 Supabase），這在純 Vite 做不到 — 我們得轉成 Next.js 16。我直接改你 repo 裡的檔案、做成一個 commit，再 push 上 GitHub。」
 
 Then run Claude Code with this prompt verbatim (the same model that's reading this skill executes it):
 
 ```
-Convert this project from Vite to Next.js 16 with the App Router. Specifically:
+Convert this project from Vite to Next.js 16 with the App Router. This must be ONE atomic commit — do not split the change across multiple commits, or Vercel will pick up a half-converted tree and fail the build.
+
+PHASE 0 — DISCOVERY (do these reads first, before writing anything):
+- Read `src/main.tsx` to find the actual stylesheet import path. Lovable templates usually use `src/styles.css`, not `src/index.css`. Whatever the actual path is, that is the file you port into `app/globals.css` BYTE-FOR-BYTE. Do not regenerate the palette/fonts from a generic "dark theme" assumption — the student may have re-themed M0.
+- Read `tsconfig.json` to confirm the `@/*` path alias points at `./src/*`. If yes, new lib/* files MUST live under `src/lib/`, not a project-root `lib/`.
+- Read `package.json` to see what's currently installed (especially: Tailwind major version, `@tailwindcss/vite` presence, `bun.lock` vs `package-lock.json`).
+
+PHASE 1 — FILE WRITES (all in one commit):
 
 1. Replace vite.config.ts + index.html + src/main.tsx with a Next.js 16 App Router skeleton:
-   - app/layout.tsx (root layout — keep the same fonts and dark theme as the existing Vite version)
+   - app/layout.tsx (root layout — import './globals.css'; keep the same fonts the M0 stylesheet uses, do NOT switch font families)
    - app/page.tsx (the landing page — port from src/App.tsx, keep all hero / features / footer text identical)
-   - app/globals.css (move from src/index.css)
+   - app/globals.css (BYTE-FOR-BYTE copy of the M0 stylesheet found in PHASE 0 — preserve every CSS variable, color, font-family declaration)
+
 2. Migrate Sign In / Sign Up / Sign Out routes to Next.js pages:
    - app/sign-in/page.tsx
    - app/sign-up/page.tsx
    - app/app/page.tsx (the post-login authenticated dashboard placeholder)
-3. Use @supabase/ssr (NOT just @supabase/supabase-js) so server components and route handlers can read the user session from cookies. Add:
-   - lib/supabase/client.ts — browser-side createBrowserClient
-   - lib/supabase/server.ts — server-side createServerClient that reads cookies
-4. Add middleware.ts at the project root that calls supabase.auth.getUser() to keep the session refreshed between requests.
-5. package.json scripts: dev = "next dev --port 3000", build = "next build", start = "next start". Bump react/react-dom to ^19, add "next": "^16". Remove all Vite + TanStack + Cloudflare deps.
-6. Keep all the visual design from the Vite version. The landing page text, hero, features, footer should look identical to the deployed M0 page. Sign-up / sign-in / sign-out flows must continue to work end-to-end against the same Supabase project.
 
-After this conversion:
-- The repo's filesystem in this workspace contains an `app/` directory and `package.json` lists `"next": "^16"`.
-- Vercel should auto-detect Framework Preset = Next.js (NOT Vite) on the next push.
-- Sign-up / sign-in / sign-out must still work on the Vercel deploy after the push lands.
+3. Use @supabase/ssr (NOT just @supabase/supabase-js) so server components and route handlers can read the user session from cookies. Add:
+   - src/lib/supabase/client.ts — browser-side createBrowserClient
+   - src/lib/supabase/server.ts — server-side createServerClient. CRITICAL: cookies() from 'next/headers' is async in Next.js 15+ — you MUST `await cookies()` before passing it to createServerClient. Use the cookies.getAll() / cookies.setAll() pattern from the Supabase docs.
+
+4. Add middleware.ts at the project root that calls supabase.auth.getUser() to keep the session refreshed between requests. (Yes, "middleware.ts" — Next.js 16 deprecates this name in favor of "proxy.ts" but middleware.ts still works; we'll migrate in a later milestone.)
+
+5. Add next.config.mjs at the project root with these contents EXACTLY (preserves M0's "build doesn't gate on types" behavior):
+
+   ```js
+   /** @type {import('next').NextConfig} */
+   const nextConfig = {
+     typescript: { ignoreBuildErrors: true },
+     eslint: { ignoreDuringBuilds: true },
+   };
+   export default nextConfig;
+   ```
+
+6. Add vercel.json at the project root with {"framework": "nextjs"} so the framework preset is pinned in-repo (more reproducible than relying on Vercel dashboard auto-detect).
+
+7. Tailwind 4 migration — these three changes land together:
+   - Remove `@tailwindcss/vite` from package.json deps.
+   - Add `@tailwindcss/postcss` to package.json deps (same version as `tailwindcss`).
+   - Add postcss.config.mjs at the project root:
+     ```js
+     export default { plugins: { '@tailwindcss/postcss': {} } };
+     ```
+   - Make sure the @import "tailwindcss"; line stays at the top of app/globals.css.
+
+8. package.json scripts: dev = "next dev --port 3000", build = "next build", start = "next start". Bump react/react-dom to ^19, add "next": "^16". Remove all Vite + TanStack + Cloudflare deps (vite, @vitejs/plugin-react, @tailwindcss/vite, vite-tsconfig-paths, etc.). Leave bun.lock alone — Vercel's `bun install` regenerates it without --frozen-lockfile.
+
+9. Leave the .lovable/ directory in place if present; it's harmless metadata and removing it is a separate concern.
+
+PHASE 2 — VERIFY (before declaring done):
+- `app/` directory exists with layout.tsx + page.tsx + globals.css.
+- `package.json` has "next": "^16" AND no "vite" / "@tailwindcss/vite" / "@vitejs/plugin-react" entries.
+- `next.config.mjs`, `postcss.config.mjs`, `vercel.json`, `middleware.ts` all exist at the project root.
+- `src/lib/supabase/server.ts` exists and `await cookies()` appears in it (grep for it).
+- `app/globals.css` first 50 lines match the M0 stylesheet's first 50 lines (preserve verbatim — no generic dark theme).
+- After this conversion: Sign-up / sign-in / sign-out must still work on the Vercel deploy.
 ```
 
-After Claude Code finishes editing, commit and push:
+After Claude Code finishes editing, commit and push **as one commit**:
 
 ```bash
 git add -A
@@ -196,13 +254,23 @@ git commit -m "M1 Step 1: convert Vite SPA to Next.js 16 App Router"
 git push origin main
 ```
 
+> **Two Cowork sandbox gotchas for `git`** (these come from `project-ai-video-reader-m0-local-setup-and-checklist`; if the student hit them in M0 they're already configured, but call them out if you see the symptoms):
+>
+> 1. **Credential helper for PAT-backed pushes.** Cowork's sandbox can't pop an interactive credential prompt. Configure once: `git config credential.helper "store --file=/tmp/.git-credentials-cowork"` and prime the file by `echo "https://<username>:<PAT>@github.com" > /tmp/.git-credentials-cowork`. After this, `git push origin main` works without prompts.
+> 2. **`.git/**/*.lock` files can't be unlinked.** If a previous command failed mid-write, lock files block all subsequent git operations. Cowork's filesystem doesn't support `unlink`, so `rm` fails. Workaround: `mkdir -p .git-trash && mv .git/index.lock .git-trash/ 2>/dev/null; mv .git/refs/heads/main.lock .git-trash/ 2>/dev/null` before retrying. (Same trick applies to "deleting" tracked files: use `git rm --cached <file> && mv <file> .cowork-trash/`.)
+
 **Verify before moving on:**
 
-- The cloned repo now contains an `app/` directory and `package.json` shows `"next": "^16.x"` (Claude Code can `grep '"next"' package.json` directly).
-- Vercel re-deploys after the conversion commit lands. Check with `mcp__vercel__*` that the latest deployment for this project is **Ready**, and that the Framework Preset auto-flipped to **Next.js** — if it didn't, set it manually in the Vercel dashboard (project → Settings → General → Framework Preset → Next.js) and trigger a redeploy.
+- The cloned repo now contains an `app/` directory and `package.json` shows `"next": "^16.x"` AND no `"vite"` / `"@tailwindcss/vite"` deps (Claude Code can `grep -E '"(next|vite|@tailwindcss/vite)"' package.json`).
+- `next.config.mjs`, `postcss.config.mjs`, `vercel.json`, `middleware.ts` all exist at the project root.
+- `src/lib/supabase/server.ts` exists and `await cookies()` appears in it (`grep -n 'await cookies' src/lib/supabase/server.ts` returns a match).
+- `app/globals.css` opens with `@import "tailwindcss";` AND its first 50 lines match the M0 stylesheet's first 50 lines (preserve verbatim — fail this check if it looks like a generic dark theme).
+- Vercel re-deploys after the conversion commit lands. Check with `mcp__vercel__*` that the latest deployment for this project is **Ready** AND the Framework Preset is **Next.js** (pinned via `vercel.json` — if it still shows Vite, the `vercel.json` write didn't land, retry).
 - Open the live URL: sign-up / sign-in / sign-out still work.
 
-If sign-up breaks: re-run Claude Code with 「Sign-up flow broke after the Next.js conversion. Restore Supabase auth using @supabase/ssr — make sure middleware.ts refreshes the session cookie and that the Sign In page reads from lib/supabase/server.ts. Keep the project as Next.js 16 App Router.」 Then commit + push and re-check the Vercel deploy.
+**Post-rename Supabase Auth check.** If M0's Supabase project has email confirmation enabled, double-check **Supabase dashboard → Authentication → URL Configuration → Site URL / Redirect URLs** still contain `/sign-in` (not the old `/signin`, if M0 was hyphen-free). The Next.js conversion may have renamed routes; stale redirects in Supabase produce 404s after the confirmation email click.
+
+If sign-up breaks: re-run Claude Code with 「Sign-up flow broke after the Next.js conversion. Restore Supabase auth using @supabase/ssr — make sure middleware.ts refreshes the session cookie and that the Sign In page reads from src/lib/supabase/server.ts (which must `await cookies()`). Keep the project as Next.js 16 App Router.」 Then commit + push and re-check the Vercel deploy.
 
 ### Step 2 — Apply the M1 Supabase schema (and save it to git)
 
@@ -293,11 +361,14 @@ Requirements:
 
    (a) A list of the signed-in user's existing jobs at the top:
        - Query: select id, created_at, video_source_url, status from jobs where user_id = auth.uid() order by created_at desc limit 20.
-       - Render as a table with columns: Created (relative time), URL (truncate to 50 chars), Status (color-coded badge — gray for pending/downloading, blue for transcribe, green for done).
+       - Render as a table with FOUR columns: Created (relative time), URL (truncate to 50 chars), Status (color-coded badge — gray for pending/downloading, blue for transcribe, green for done), **Transcript**.
+       - **Transcript column behavior — required, do not omit:**
+         * When `status === 'done'`: render a download link `<a href="/api/jobs/{job.id}/transcript" download="transcript-{job.id_short}.txt">.txt</a>` with a small download icon. Use `id.slice(0, 8)` for `id_short` so the filename is unique-ish but not the full uuid.
+         * When `status !== 'done'`: render a muted em-dash ("—") so the column still aligns visually. Do NOT render a disabled-looking button — just the dash.
        - If no jobs yet, show a friendly empty state: "No transcriptions yet. Submit your first video below."
 
    (b) A submission form below the list:
-       - Field: Video URL (text input, required, placeholder "https://www.youtube.com/watch?v=...")
+       - Field: Video URL (text input, required, placeholder "Direct mp4 / mp3 URL (e.g. CloudFront, Vimeo, Internet Archive)"). NOTE: YouTube URLs require cookie auth from cloud IPs and are NOT supported in M1.
        - Field: Topic (text input, optional, placeholder "e.g. Tech podcast — useful context for the model")
        - Field: Language (select, default "zh", options: zh / en / ja)
        - Submit button labeled "Transcribe"
@@ -321,10 +392,15 @@ git push origin main
 - Vercel auto-deploys; check the latest deploy is **Ready** via `mcp__vercel__*`.
 - On the live URL, sign in and navigate to `/upload` — see the form and the empty-state message ("No transcriptions yet...").
 - Sign out and try to visit `/upload` directly — should redirect to `/sign-in`.
+- **Open `Read` on the generated `/upload` page source (e.g. `app/upload/page.tsx`) and confirm the jobs table has a fourth column header literally containing the word "Transcript" AND a conditional branch on `status === 'done'` that renders an `<a href="/api/jobs/...">` download link.** If either is missing, re-run the Step 3 prompt — Claude often drops this column even when asked.
 
-The form's POST will fail with a 404 right now — that's expected. We add the route handler in Step 4.
+The form's POST will fail with a 404 right now — that's expected. We add the POST + GET route handlers in Step 4.
 
-### Step 4 — Add the `/api/jobs` route handler
+### Step 4 — Add the `/api/jobs` route handlers (POST + transcript GET)
+
+We need two route handlers: `POST /api/jobs` enqueues a new job (used by the form), and `GET /api/jobs/[id]/transcript` streams the finished `.txt` back (used by the Transcript-column download link from Step 3).
+
+#### 4a — `POST /api/jobs`
 
 Have Claude Code create this file in the cloned repo:
 
@@ -407,7 +483,98 @@ SUPABASE_SECRET_KEY=sb_secret_...                         # server-only, FULL AC
 
 > ⚠️ **`SUPABASE_SECRET_KEY` is a server-only secret.** Never prefix it with `NEXT_PUBLIC_`. Never reference it in a Client Component. Anyone who gets this key has full access to the database, bypassing all RLS.
 
+> **Setting these env vars is the one M1 step that Cowork can't do for you.** The Vercel MCP exposes deploy/list tools but no env-var write tool, and `api.vercel.com` is blocked from Cowork's sandbox (the REST endpoint `POST /v10/projects/{id}/env` returns HTTP 000). The student has to either:
+>
+> - **(Recommended)** open Vercel dashboard → project → Settings → Environment Variables → Add, paste each variable, choose **Production + Preview** (Vercel auto-flags any value starting with `sb_secret_*` as "sensitive" and will not let you add it to Development — that's expected, not a bug; we don't use `vercel dev` in this course), OR
+> - run `vercel env add SUPABASE_SECRET_KEY production` from a local terminal where `vercel` CLI is authenticated.
+>
+> Tell the student up front that this step is a brief detour out of Cowork. Don't waste cycles trying to push it through the MCP.
+
 After adding env vars in Vercel, **redeploy** — Vercel doesn't re-evaluate env vars for already-built deployments.
+
+#### 4b — `GET /api/jobs/[id]/transcript`
+
+This is what the Transcript-column download link from Step 3 hits. It must:
+
+1. Authenticate the caller (same cookie session pattern as 4a).
+2. Look up the job by `id`, **gate on `user_id = session.user.id`** so a user can't download someone else's transcript by guessing UUIDs.
+3. Read `subtitle_txt_content` from the job's current session (`jobs.current_session_id` → `job_sessions.subtitle_txt_content`).
+4. Stream it back with `Content-Type: text/plain; charset=utf-8` and `Content-Disposition: attachment; filename="transcript-<short>.txt"` so the browser downloads instead of rendering.
+
+Have Claude Code create this file:
+
+**File path:** `app/api/jobs/[id]/transcript/route.ts`
+
+```ts
+import { NextResponse } from 'next/server'
+import { createServerClient } from '@supabase/ssr'
+import { cookies } from 'next/headers'
+import { createClient } from '@supabase/supabase-js'
+
+export async function GET(
+  _req: Request,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  const { id } = await params
+
+  // 1. Auth — same pattern as POST /api/jobs.
+  const cookieStore = await cookies()
+  const supabase = createServerClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY!,
+    { cookies: { getAll: () => cookieStore.getAll() } }
+  )
+  const {
+    data: { user },
+  } = await supabase.auth.getUser()
+  if (!user) {
+    return NextResponse.json({ error: 'unauthorized' }, { status: 401 })
+  }
+
+  // 2. Look up the job + verify ownership in one query.
+  //    Service-role client bypasses RLS; we re-impose ownership via the WHERE.
+  const admin = createClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.SUPABASE_SECRET_KEY!
+  )
+  const { data: job } = await admin
+    .from('jobs')
+    .select('id, user_id, status, current_session_id')
+    .eq('id', id)
+    .eq('user_id', user.id)
+    .maybeSingle()
+  if (!job) {
+    return NextResponse.json({ error: 'not found' }, { status: 404 })
+  }
+  if (job.status !== 'done' || !job.current_session_id) {
+    return NextResponse.json({ error: 'not ready' }, { status: 409 })
+  }
+
+  // 3. Pull the transcript text from the current session.
+  const { data: session } = await admin
+    .from('job_sessions')
+    .select('subtitle_txt_content')
+    .eq('id', job.current_session_id)
+    .single()
+  const txt = session?.subtitle_txt_content
+  if (!txt) {
+    return NextResponse.json({ error: 'transcript missing' }, { status: 500 })
+  }
+
+  // 4. Stream it back as a file download.
+  const filename = `transcript-${id.slice(0, 8)}.txt`
+  return new NextResponse(txt, {
+    status: 200,
+    headers: {
+      'Content-Type': 'text/plain; charset=utf-8',
+      'Content-Disposition': `attachment; filename="${filename}"`,
+      'Cache-Control': 'no-store',
+    },
+  })
+}
+```
+
+> **Why the ownership filter matters.** The service-role key bypasses RLS, so a missing `.eq('user_id', user.id)` would let any signed-in user download any transcript by guessing a UUID. Treat any service-role read as untrusted unless you re-impose the per-user filter explicitly. This is the same pattern used in production (`CLAUDE.md` → "service-role writes" in API routes).
 
 **Verify before moving on:**
 
@@ -417,6 +584,7 @@ After adding env vars in Vercel, **redeploy** — Vercel doesn't re-evaluate env
   - **Cowork mode:** `mcp__supabase_remote__execute_sql` with `select id, status, video_source_url from jobs order by created_at desc limit 1`. Should return the just-submitted row with `status = 'pending'`.
   - **CLI mode:** same query via `supabase db execute` or dashboard.
 - Job stays at `pending` indefinitely — no worker yet. That's expected; we add it next.
+- `GET /api/jobs/<id>/transcript` without a cookie → 401. With a cookie, against a still-pending job → 409 (not ready). Both are expected pre-worker. The 200 case is tested end-to-end in Step 6c.
 
 ### Step 5 — Inline the worker code
 
@@ -680,14 +848,22 @@ Restart=always
 RestartSec=5
 StandardOutput=append:/var/log/m1-distributor.log
 StandardError=append:/var/log/m1-distributor.log
-# AWS region for boto3 (SSM client) — set to wherever you launched the EC2
+# CRITICAL: systemd's default PATH is /usr/bin:/bin — that does NOT include
+# the venv's bin/, so `subprocess.run(["yt-dlp", ...])` from worker.py crashes
+# with FileNotFoundError: 'yt-dlp'. Prepend the venv bin dir explicitly.
+Environment=PATH=/home/ubuntu/app/worker/venv/bin:/usr/local/bin:/usr/bin:/bin
+# AWS region for boto3 (SSM client) — set to wherever you launched the EC2.
+# Resolve at deploy time with: aws ec2 describe-instances --instance-ids "$INSTANCE_ID" --query 'Reservations[0].Instances[0].Placement.AvailabilityZone' --output text | sed 's/[a-z]$//'
 Environment=AWS_DEFAULT_REGION=us-west-2
 
 [Install]
 WantedBy=multi-user.target
 ```
 
-> Update `AWS_DEFAULT_REGION` to match the region the EC2 was launched in (M1 prereq §2.1). `boto3` will fail with `NoRegionError` if it can't determine the region.
+> **Two things to verify in this unit file before deploying:**
+>
+> 1. **`Environment=PATH=...`** — without the venv's `bin/` on PATH, `yt-dlp` (installed via `pip` into the venv) is invisible to `subprocess.run`, and the worker dies the moment a job is dispatched. This is the single most common silent failure in M1; the symptom (`FileNotFoundError: 'yt-dlp'`) only appears in `/var/log/m1-distributor.log`, NOT in `journalctl`.
+> 2. **`Environment=AWS_DEFAULT_REGION=...`** — must match the region the EC2 was launched in (M1 prereq §2.1). The unit file is templated to `us-west-2`; if the student launched in `us-east-1` (the AWS API MCP default), the worker crashes with `NoRegionError`. Resolve the actual region from `describe-instances` (command in the comment above) before pushing.
 
 **Verify before moving on:**
 
@@ -701,6 +877,20 @@ We do every EC2-side action through `call_aws ssm send-command`. Get the instanc
 INSTANCE_ID=$(call_aws ec2 describe-instances --filters "Name=tag:Name,Values=m1-worker" "Name=instance-state-name,Values=running" --query 'Reservations[0].Instances[0].InstanceId' --output text)
 ```
 
+> **Three gotchas to internalize before running any `send-command`:**
+>
+> 1. **Use the JSON form for `--parameters`, not the shorthand.** The `'commands=["...","..."]'` shorthand parser chokes on brackets and embedded quotes once MCP shell-tokenization gets in the loop. Use `--parameters '{"commands":["...","..."]}'` (wrap the whole JSON in single quotes to survive MCP shell-tokenization). Every example below uses this form.
+> 2. **SSM truncates command output.** Long stdout (e.g. a full `pip install` log) gets cut mid-line with `---Output truncated---`. For anything noisier than 3-4 lines, **redirect to a file on the EC2 and read it back in a separate command**: `... > /tmp/pip.log 2>&1`, then `cat /tmp/pip.log` in the next `send-command`.
+> 3. **Patch the unit file's `AWS_DEFAULT_REGION` to match this EC2's actual region BEFORE pushing.** The committed `m1-distributor.service` is templated to `us-west-2`. Resolve the real region in one call, then if it differs, `Edit` the unit file in the repo + `git push` before running 6a:
+>
+>    ```
+>    call_aws ec2 describe-instances --instance-ids "$INSTANCE_ID" \
+>      --query 'Reservations[0].Instances[0].Placement.AvailabilityZone' \
+>      --output text
+>    ```
+>
+>    Strip the trailing letter (e.g. `us-east-1a` → `us-east-1`), patch `Environment=AWS_DEFAULT_REGION=<region>` in `worker/m1-distributor.service`, commit + push, then continue. Skipping this guarantees the worker crashes with `NoRegionError` on first poll.
+
 #### 6a — Pull the new worker code and install deps
 
 ```
@@ -708,13 +898,17 @@ call_aws ssm send-command \
   --instance-ids "$INSTANCE_ID" \
   --document-name "AWS-RunShellScript" \
   --comment "M1: pull worker code + install Python deps" \
-  --parameters 'commands=[
-    "sudo -u ubuntu bash -c \"cd /home/ubuntu/app && git pull\"",
-    "sudo -u ubuntu bash -c \"cd /home/ubuntu/app/worker && ./venv/bin/pip install -r requirements.txt\""
-  ]'
+  --parameters '{"commands":["sudo -u ubuntu bash -c \"cd /home/ubuntu/app && git pull > /tmp/git-pull.log 2>&1\"","sudo -u ubuntu bash -c \"cd /home/ubuntu/app/worker && ./venv/bin/pip install -r requirements.txt > /tmp/pip.log 2>&1\""]}'
 ```
 
-Wait ~30 s, then read the output via `call_aws ssm list-command-invocations --command-id <CommandId> --details --query 'CommandInvocations[0].CommandPlugins[0].Output'`. You should see `Successfully installed openai-... supabase-... boto3-... yt-dlp-...`.
+`pip install` on a `t3.small` can take **60–90 s** (not 30) for the first install of `openai` + `supabase` + `yt-dlp`. After issuing the command, wait ~90 s, then read the captured log file in a separate call:
+
+```
+call_aws ssm send-command --instance-ids "$INSTANCE_ID" --document-name "AWS-RunShellScript" \
+  --parameters '{"commands":["tail -30 /tmp/pip.log","tail -10 /tmp/git-pull.log"]}'
+```
+
+You should see `Successfully installed openai-... supabase-... boto3-... yt-dlp-...` in `/tmp/pip.log`.
 
 #### 6b — Install the systemd unit and start the service
 
@@ -723,43 +917,52 @@ call_aws ssm send-command \
   --instance-ids "$INSTANCE_ID" \
   --document-name "AWS-RunShellScript" \
   --comment "M1: install m1-distributor.service and start it" \
-  --parameters 'commands=[
-    "sudo cp /home/ubuntu/app/worker/m1-distributor.service /etc/systemd/system/m1-distributor.service",
-    "sudo touch /var/log/m1-distributor.log && sudo chown ubuntu:ubuntu /var/log/m1-distributor.log",
-    "sudo systemctl daemon-reload",
-    "sudo systemctl enable --now m1-distributor.service",
-    "sleep 3 && sudo systemctl status m1-distributor.service --no-pager"
-  ]'
+  --parameters '{"commands":["sudo cp /home/ubuntu/app/worker/m1-distributor.service /etc/systemd/system/m1-distributor.service","sudo touch /var/log/m1-distributor.log && sudo chown ubuntu:ubuntu /var/log/m1-distributor.log","sudo systemctl daemon-reload","sudo systemctl enable --now m1-distributor.service","sleep 3 && sudo systemctl status m1-distributor.service --no-pager > /tmp/svc-status.log 2>&1"]}'
 ```
 
-The status output should show `Active: active (running)`. If it shows `failed`, read the log via the next call:
+Then read the status separately (`status` output is multi-line and can truncate):
+
+```
+call_aws ssm send-command --instance-ids "$INSTANCE_ID" --document-name "AWS-RunShellScript" \
+  --parameters '{"commands":["cat /tmp/svc-status.log"]}'
+```
+
+The status output should show `Active: active (running)`. If it shows `failed`, look at the **worker log file** (not journalctl — see note below):
 
 ```
 call_aws ssm send-command \
   --instance-ids "$INSTANCE_ID" \
   --document-name "AWS-RunShellScript" \
-  --parameters 'commands=["sudo journalctl -u m1-distributor.service -n 50 --no-pager"]'
+  --parameters '{"commands":["tail -100 /var/log/m1-distributor.log"]}'
 ```
 
 Most-common failures and fixes:
-- `NoRegionError` → fix `AWS_DEFAULT_REGION` in `m1-distributor.service`, push, repeat 6a + 6b.
+- **`FileNotFoundError: 'yt-dlp'` in `/var/log/m1-distributor.log` (NOT in journalctl)** → systemd inherits `PATH=/usr/bin:/bin`, which doesn't include the venv's `bin/`. Fix: confirm `Environment=PATH=/home/ubuntu/app/worker/venv/bin:/usr/local/bin:/usr/bin:/bin` is in `m1-distributor.service`. Push, repeat 6a + 6b. (This is the #1 silent failure for first-time M1 students.)
+- `NoRegionError` → `AWS_DEFAULT_REGION` in `m1-distributor.service` doesn't match the EC2's actual region. Resolve from `call_aws ec2 describe-instances --instance-ids "$INSTANCE_ID" --query 'Reservations[0].Instances[0].Placement.AvailabilityZone' --output text` (strip the trailing letter), fix the unit file, push, repeat 6a + 6b.
 - `AccessDeniedException` on `secretsmanager:GetSecretValue` → IAM role missing the `m1-secrets-read` inline policy from M1 prereq §2.3. Re-run that `put-role-policy` call.
 - `ResourceNotFoundException: Secrets Manager can't find the specified secret` → one of the three secret names (`openai-api-key`, `supabase-url`, `supabase-secret-key`) wasn't created. Re-check via `call_aws secretsmanager list-secrets --query 'SecretList[].Name'`. Re-create the missing one via `call_aws secretsmanager create-secret --name <name> --secret-string '<value>'`.
 
+> **Where to look for what:** `journalctl -u m1-distributor.service` only shows systemd lifecycle events (Started / Stopped / Deactivated) — because the unit redirects stdout/stderr to `/var/log/m1-distributor.log`. **Real worker activity, tracebacks, and `[<uuid>] downloading...` lines live in that file, not in journalctl.** When debugging, `tail -100 /var/log/m1-distributor.log` is the right command, not `journalctl`.
+
 #### 6c — Smoke test (end-to-end)
 
-1. From the Vercel deploy, sign in and submit a 30-second YouTube clip via `/upload` (try `https://www.youtube.com/watch?v=jNQXAC9IVRw` — the 19-second "Me at the zoo" clip).
+1. From the Vercel deploy, sign in and submit a short clip via `/upload`. **Use a non-YouTube direct media URL** — YouTube rate-limits/bot-checks AWS/GCP/Azure IP ranges, so from a cloud EC2 the download fails with `Sign in to confirm you're not a bot`. Reliable choices that work without cookies:
+   - **Internet Archive** (recommended — small, predictable, English speech): `https://archive.org/download/MLKDream/MLKDream.mp3` (a few minutes of MLK's "I Have a Dream" — set Language = `en` on the form).
+   - **Wikimedia Commons** direct .mp4/.webm — `https://upload.wikimedia.org/wikipedia/commons/<...>` URLs work with yt-dlp's generic extractor.
+   - **Any CloudFront / S3 / Vimeo direct .mp4 link** the student already controls.
+   - YouTube will only work if the student adds `--cookies-from-browser` handling to `worker.py` — out of scope for M1.
 2. Within 10 seconds, the distributor's log gets a `spawned worker for job <uuid>` line. Read it:
    ```
-   call_aws ssm send-command --instance-ids "$INSTANCE_ID" --document-name "AWS-RunShellScript" --parameters 'commands=["tail -20 /var/log/m1-distributor.log"]'
+   call_aws ssm send-command --instance-ids "$INSTANCE_ID" --document-name "AWS-RunShellScript" --parameters '{"commands":["tail -20 /var/log/m1-distributor.log"]}'
    ```
 3. The spawned worker logs `[<uuid>] downloading ...`, then `[<uuid>] transcribing N chunk(s)`, then `[<uuid>] done — XXXX chars` — also in `/var/log/m1-distributor.log` because we stream Popen stdout to systemd which streams it to the same log file.
-4. Refresh `/upload` — the job's status badge walks `pending → downloading → transcribe → done`.
+4. Refresh `/upload` — the job's status badge walks `pending → downloading → transcribe → done`, and the **Transcript column** flips from "—" to a clickable `.txt` download link.
 5. Verify the transcript landed in Supabase:
    - **Cowork mode:** `mcp__supabase_remote__execute_sql` with `select length(subtitle_txt_content) from job_sessions where job_id = (select id from jobs order by created_at desc limit 1)`. Should be > 50.
    - **CLI mode:** same query.
+6. **Click the Transcript-column download link.** A file named `transcript-<short>.txt` should download with the actual transcript text inside. Open it; first ~200 chars should be readable transcript, not JSON or HTML. If the click does nothing or downloads an error JSON, the Transcript column was rendered but `GET /api/jobs/[id]/transcript` (Step 4b) is broken — re-check that file landed in the repo and Vercel re-deployed.
 
-If a worker errors (most common: bad SSM secret value, EC2 missing ffmpeg, video URL not yt-dlp-compatible), `/var/log/m1-distributor.log` shows the traceback — read it via `call_aws ssm send-command ... 'tail -100 /var/log/m1-distributor.log'`. The job stays stuck in whatever status it failed at; reset it manually via Supabase MCP:
+If a worker errors (most common: bad SSM secret value, missing `Environment=PATH=` in the unit file, EC2 missing ffmpeg, video URL is a YouTube link), `/var/log/m1-distributor.log` shows the traceback — read it via `call_aws ssm send-command ... --parameters '{"commands":["tail -100 /var/log/m1-distributor.log"]}'`. The job stays stuck in whatever status it failed at; reset it manually via Supabase MCP:
 
 ```
 mcp__supabase_remote__execute_sql:
@@ -800,6 +1003,15 @@ Once the smoke test passes, load `m1-ai-video-transcript-checklist` and walk thr
 
 9. **EC2 stopped → web app shows "stuck" jobs.**
    When the student stops the EC2 to save money, no worker is polling, so new jobs sit at `pending` forever. Make sure the student knows: start the EC2 first, then submit jobs.
+
+10. **`middleware.ts` deprecation warning in Next.js 16.**
+    `next build` prints "The 'middleware' file convention is deprecated. Please use 'proxy' instead." Functional, not blocking — leave it as `middleware.ts` for M1 so the Supabase docs' snippet still copy-pastes cleanly. A later milestone migrates to `proxy.ts`.
+
+11. **`bun.lock` after the package.json overhaul.**
+    Lovable's M0 scaffold ships a `bun.lock`. The Step 1 conversion massively rewrites `package.json`, so the lockfile is stale. Vercel's default build runs `bun install` *without* `--frozen-lockfile`, so it regenerates fine and the deploy succeeds. Don't manually delete `bun.lock`; leave it and let Vercel rebuild it.
+
+12. **`.lovable/` directory.**
+    Lovable adds a `.lovable/project.json` metadata folder. Harmless, irrelevant after the conversion. Leave it in the repo — removing it isn't worth the diff noise.
 
 ## Expected duration
 

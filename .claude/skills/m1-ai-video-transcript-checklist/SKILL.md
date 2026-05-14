@@ -92,7 +92,7 @@ Must return all four names. If any of the first three (`openai-api-key`, `supaba
 
 If A3 fails: **stop**. The student likely cribbed the production schema, which has SRT/VTT/reviewed columns. M1 is intentionally smaller — re-apply the M1-only migration from `m1-ai-video-transcript` Step 2.
 
-### Section B — Web app (Vercel + Next.js + auth-gated /upload + /api/jobs) (5 checks)
+### Section B — Web app (Vercel + Next.js + auth-gated /upload + /api/jobs) (7 checks)
 
 | # | Check | How to verify |
 |---|---|---|
@@ -101,24 +101,32 @@ If A3 fails: **stop**. The student likely cribbed the production schema, which h
 | B3 | `/upload` is auth-gated | `curl -sI <vercel-url>/upload \| head -3` returns either a 200 (with login form rendering) or a 30x redirect to `/sign-in`. Manually open in incognito → confirms it kicks back to sign-in. |
 | B4 | `POST /api/jobs` rejects unauthenticated requests | `curl -s -X POST <vercel-url>/api/jobs -H 'Content-Type: application/json' -d '{"video_source_url":"x"}'` returns `{"error":"unauthorized"}` with HTTP 401. |
 | B5 | `POST /api/jobs` rejects missing body field | Same curl but with `-d '{}'` (signed in via cookie — easiest is to just trust the student's manual browser test) returns 400 with `video_source_url required`. Skip this if simulating an authenticated curl is too painful; the form-validation in Step 3 already catches empty submits. |
+| B6 | `/upload` jobs table has a Transcript column | `gh api repos/<owner>/<repo>/contents/app/upload/page.tsx --jq '.content' \| base64 -d \| grep -i 'transcript'` — must match the header literal "Transcript" AND a string like `/api/jobs/` (the download link target). (Cowork: open `app/upload/page.tsx` on github.com and visually confirm both.) The student's first AI-generated pass often omits this column entirely; this check catches that. |
+| B7 | `GET /api/jobs/[id]/transcript` route exists and gates auth | `curl -sI <vercel-url>/api/jobs/00000000-0000-0000-0000-000000000000/transcript` — must return 401 (unauthorized) or 404 (not found), NEVER 200 or a redirect. A 405 (method not allowed) means the route file is missing — re-run Step 4b. |
 
 If B1 fails: Vercel deploy is broken. Check the most recent deployment log in Vercel dashboard — most likely cause is the Vite→Next conversion left build errors.
 
 If B2 still shows Vite: the Vite→Next.js conversion didn't take. Re-run Claude Code in the cloned repo per `m1-ai-video-transcript` Step 1, then commit + push.
 
-### Section C — EC2 worker host (5 checks, all via SSM)
+### Section C — EC2 worker host (7 checks, all via SSM)
 
 All Section C checks run as one consolidated `send-command` per check (via `call_aws` in Cowork or `aws` CLI in CLI mode). Read each command's output via `call_aws ssm list-command-invocations --command-id <id> --details --query 'CommandInvocations[0].CommandPlugins[0].Output' --output text`.
 
 | # | Check | How to verify |
 |---|---|---|
-| C1 | EC2 reachable via SSM | `call_aws ssm send-command --instance-ids "$INSTANCE_ID" --document-name AWS-RunShellScript --parameters 'commands=["echo reachable"]'` returns `reachable` after polling for the result. (If `send-command` itself fails with `InvalidInstanceId`, the instance isn't SSM-managed — back to M1 prereq.) |
+| C1 | EC2 reachable via SSM | `call_aws ssm send-command --instance-ids "$INSTANCE_ID" --document-name AWS-RunShellScript --parameters '{"commands":["echo reachable"]}'` returns `reachable` after polling for the result. (If `send-command` itself fails with `InvalidInstanceId`, the instance isn't SSM-managed — back to M1 prereq.) Use the JSON form, not `'commands=[...]'` shorthand — the shorthand parser chokes on brackets through the MCP shell layer. |
 | C2 | ffmpeg installed | `commands=["ffmpeg -version \| head -1"]` returns a version line starting with `ffmpeg version`. |
 | C3 | Python 3.12 + venv ready | `commands=["ls /home/ubuntu/app/worker/venv/bin/python && /home/ubuntu/app/worker/venv/bin/python --version"]` returns the python path and `Python 3.12.x`. |
 | C4 | Worker code + service file present | `commands=["ls /home/ubuntu/app/worker/worker.py /home/ubuntu/app/worker/distributor.py /home/ubuntu/app/worker/requirements.txt /home/ubuntu/app/worker/m1-distributor.service && [ ! -f /home/ubuntu/app/worker/.env ] && echo 'no .env (good)' \|\| echo 'WARNING: .env exists, secrets should live in AWS Secrets Manager, not on disk'"]` lists all four worker files **and** confirms there is no `.env` file (M1 reads secrets from AWS Secrets Manager via `boto3`; a `.env` on disk indicates the student copy-pasted from an older version of the skill). |
-| C5 | Distributor service running | `commands=["sudo systemctl is-active m1-distributor.service && sudo journalctl -u m1-distributor.service -n 5 --no-pager"]` returns `active` followed by the last 5 log lines. The log should include a recent `distributor: polling every 10s` or `spawned worker for job ...` line (proof the loop is alive, not just the process started). |
+| C5 | Distributor service running | `{"commands":["sudo systemctl is-active m1-distributor.service","sudo tail -10 /var/log/m1-distributor.log"]}` returns `active` followed by the last 10 worker-log lines. **Read `/var/log/m1-distributor.log`, NOT `journalctl`** — the unit file redirects stdout/stderr to that file, so journalctl only shows lifecycle events (Started/Stopped). The log should include a recent `distributor: polling every 10s` or `spawned worker for job ...` line (proof the loop is alive, not just the process started). |
+| C6 | Unit file has `Environment=PATH=` including the venv bin dir | `{"commands":["grep '^Environment=PATH' /etc/systemd/system/m1-distributor.service"]}` must return a line containing `/home/ubuntu/app/worker/venv/bin`. Without this, systemd's default PATH (`/usr/bin:/bin`) hides `yt-dlp`, and every job dies with `FileNotFoundError: 'yt-dlp'` — visible in `/var/log/m1-distributor.log` but NOT in `journalctl`, and NOT caught by C5 (the service is still "active"). |
+| C7 | Unit file's `AWS_DEFAULT_REGION` matches this EC2's actual region | `{"commands":["grep '^Environment=AWS_DEFAULT_REGION' /etc/systemd/system/m1-distributor.service"]}` returns the region. Cross-check against `call_aws ec2 describe-instances --instance-ids "$INSTANCE_ID" --query 'Reservations[0].Instances[0].Placement.AvailabilityZone' --output text` (strip the trailing letter). They must match. Mismatch → `NoRegionError` on first Secrets Manager call → worker can't authenticate. |
 
-If C5 fails but C1–C4 pass: the service is installed but not running. Start it via SSM: `call_aws ssm send-command ... 'commands=["sudo systemctl start m1-distributor.service"]'`. If it crashes immediately, read `journalctl -u m1-distributor.service -n 50 --no-pager` (most-likely causes: `AWS_DEFAULT_REGION` wrong in the unit file; IAM role missing the `m1-secrets-read` inline policy granting `secretsmanager:GetSecretValue`; or one of the three secret names — `openai-api-key`, `supabase-url`, `supabase-secret-key` — not yet created in Secrets Manager).
+If C5 fails but C1–C4 pass: the service is installed but not running. Start it via SSM: `{"commands":["sudo systemctl start m1-distributor.service"]}`. If it crashes immediately, read `/var/log/m1-distributor.log` (most-likely causes: `AWS_DEFAULT_REGION` wrong → see C7; IAM role missing the `m1-secrets-read` inline policy granting `secretsmanager:GetSecretValue`; one of the three secret names — `openai-api-key`, `supabase-url`, `supabase-secret-key` — not yet created in Secrets Manager).
+
+If C6 fails: edit `worker/m1-distributor.service` in the repo to include `Environment=PATH=/home/ubuntu/app/worker/venv/bin:/usr/local/bin:/usr/bin:/bin`, push, then re-run Step 6a + 6b in the main skill (the EC2 needs to `cp` the updated unit into `/etc/systemd/system/` and `daemon-reload`).
+
+If C7 fails: same fix loop as C6 — patch the region in the unit file in the repo, push, re-run 6a + 6b.
 
 ### Section D — End-to-end transcribe (4 checks)
 
@@ -134,10 +142,13 @@ When the student confirms:
 |---|---|---|
 | D1 | Job row created with `status='pending'` | `mcp__supabase_remote__execute_sql`: `SELECT id, status, video_source_url, created_at FROM jobs ORDER BY created_at DESC LIMIT 1`. The `created_at` must be within the last 2 minutes; status starts at `pending`. |
 | D2 | Within 10–20 s, status flips to `downloading` | Re-run the query. If still `pending`, the distributor isn't picking up — go back to C5. |
-| D3 | Within 1–3 minutes, status reaches `done` | Re-run the query every 30 s. Walks `pending → downloading → transcribe → done`. If it stops at `downloading` or `transcribe`, read the worker log via SSM: `call_aws ssm send-command --instance-ids "$INSTANCE_ID" --document-name AWS-RunShellScript --parameters 'commands=["tail -50 /var/log/m1-distributor.log"]'`. Most common errors: wrong SSM parameter value (`OPENAI_API_KEY` typo), video URL not yt-dlp-compatible, ffmpeg missing. |
+| D3 | Within 1–3 minutes, status reaches `done` | Re-run the query every 30 s. Walks `pending → downloading → transcribe → done`. If it stops at `downloading` or `transcribe`, read the worker log via SSM: `call_aws ssm send-command --instance-ids "$INSTANCE_ID" --document-name AWS-RunShellScript --parameters '{"commands":["tail -50 /var/log/m1-distributor.log"]}'`. Most common errors: `FileNotFoundError: 'yt-dlp'` (C6 — PATH missing), `NoRegionError` (C7 — region mismatch), `OPENAI_API_KEY` typo in Secrets Manager, `ffmpeg` missing, or **the student tried a YouTube URL** (YouTube rate-limits cloud IPs — use Internet Archive / Wikimedia / a direct .mp4 URL instead). |
 | D4 | The transcript is plausible | `mcp__supabase_remote__execute_sql`: `SELECT length(subtitle_txt_content) AS chars, left(subtitle_txt_content, 200) AS preview FROM job_sessions WHERE job_id = (SELECT id FROM jobs ORDER BY created_at DESC LIMIT 1)`. `chars` should be > 50; the preview should look like real text in the language the student selected (not English when `zh` was chosen, etc.). |
+| D5 | Transcript column on `/upload` shows a working download link for the done job | Manually: the student opens `/upload` signed in and clicks the `.txt` link in the Transcript column for the just-completed job. A file named `transcript-<short>.txt` should download, opening to readable text matching D4's preview. If the click does nothing or downloads an error JSON, B6/B7 are misconfigured even though the backend is fine. |
 
 If D4 produces gibberish or wrong language: the student probably submitted a `language` that doesn't match the audio. Whisper is forgiving but not magic. Re-submit with the correct language.
+
+If D5 fails but D4 passes: the transcript exists in the DB but the user can't get to it. Re-check Step 3 (Transcript column wiring) and Step 4b (GET handler).
 
 ### Section E — Cleanup hygiene (2 checks)
 
@@ -170,6 +181,8 @@ Section B — Web app
   B3 /upload is auth-gated             ✅
   B4 POST /api/jobs rejects no auth    ✅
   B5 POST /api/jobs validates body     ✅
+  B6 /upload has Transcript column     ✅
+  B7 GET transcript route exists+auth  ✅
 
 Section C — EC2 worker host
   C1 EC2 reachable via SSM             ✅
@@ -177,19 +190,22 @@ Section C — EC2 worker host
   C3 Python 3.12 venv ready            ✅
   C4 Worker code + service file + no on-disk .env  ✅
   C5 m1-distributor.service is active  ✅
+  C6 Unit PATH includes venv bin       ✅
+  C7 Unit region matches EC2 region    ✅
 
 Section D — End-to-end transcribe
   D1 Job row created (pending)         ✅
   D2 Status flips to downloading       ✅
   D3 Status reaches done               ✅
   D4 Transcript is plausible           ✅
+  D5 Transcript download link works    ✅
 
 Section E — Cleanup hygiene
   E1 Knows how to stop EC2             ✅
   E2 OpenAI billing limit set          ⚠️  (recommended, not required)
 
 =====================================
-Verdict: 19/20 pass, 1 advisory
+Verdict: 24/25 pass, 1 advisory
 M1 status: READY for M2
 ```
 
