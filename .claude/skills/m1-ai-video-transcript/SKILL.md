@@ -68,6 +68,10 @@ The conversational flow below is the same in both modes — only the tool choice
 
 Before walking the steps, the student should understand the moving parts. M1 is unusual in that it deploys *one repo* to *two completely different runtimes* — Next.js to Vercel, Python to EC2 — without Docker, CI, or SSH.
 
+![AI Video Reader architecture](assets/ai_video_reader_structure.jpg)
+
+*User → GitHub repo → Vercel-hosted Next.js writes to Supabase; AWS EC2 worker reads pending jobs, runs OpenAI Whisper, writes transcripts back.*
+
 ### One repo, two deploy targets
 
 Everything lives in the **same GitHub repo** the student created in M0. M1 just adds a `worker/` subdirectory:

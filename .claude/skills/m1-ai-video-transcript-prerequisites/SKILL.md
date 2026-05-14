@@ -27,6 +27,10 @@ By the end of this skill the student has:
 
 ## How M1 will deploy code to this EC2 (preview)
 
+![AI Video Reader architecture](assets/ai_video_reader_structure.jpg)
+
+*User → GitHub repo → Vercel-hosted Next.js writes to Supabase; the EC2 you provision here reads pending jobs, runs OpenAI Whisper, writes transcripts back.*
+
 This prereq builds the EC2; the **main M1 skill** writes the worker code and starts deploying to it. So you (or the student) understands what infrastructure to optimize for: the deploy model is **GitHub-pull + systemd**, no Docker, no CI, no SSH.
 
 - The M1 worker code lives in the **same GitHub repo as the M0 web app** — under a new `worker/` subdirectory the main skill creates in Step 5. (Vercel auto-deploys `app/` as before; it ignores `worker/`.)

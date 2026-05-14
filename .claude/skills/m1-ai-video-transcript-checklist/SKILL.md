@@ -11,6 +11,10 @@ Verifies the student has actually completed M1 — not just *thinks* they have. 
 
 **Run this AFTER `m1-ai-video-transcript` Step 7, or any time the student claims M1 is done.**
 
+![AI Video Reader architecture](assets/ai_video_reader_structure.jpg)
+
+*The four pieces this checklist verifies: GitHub repo → Vercel-hosted Next.js writes to Supabase; EC2 worker reads pending jobs, runs OpenAI Whisper, writes transcripts back. Sections A–E below map onto these boxes.*
+
 ## Execution mode: Cowork vs CLI (read this first)
 
 Every check in this skill goes through MCP — no SSH, no terminal required (consistent with the SSM-only path established in `m1-ai-video-transcript-prerequisites`).
