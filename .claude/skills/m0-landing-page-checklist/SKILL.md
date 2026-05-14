@@ -174,6 +174,22 @@ If E3 fails: copy the env vars from Lovable's `.env` file (or Supabase dashboard
 
 If E4 fails: walk the student through Supabase dashboard → Authentication → Providers → Email and verify "Confirm email" is OFF for v1 simplicity. If still failing, look at the browser console on the Vercel deploy — usually a CORS or env var issue.
 
+### Section F — Cowork workspace + GitHub PAT (3 checks)
+
+These verify the setup from `project-ai-video-reader-m0-local-setup-and-checklist.txt` — the bridge work between M0 and the M1 prereq skill. **M1 assumes all three are green**, so this section is the gate between M0 and any M1 work (including loading `m1-ai-video-transcript-prerequisites`).
+
+| # | Check | How to verify |
+|---|---|---|
+| F1 | The student's GitHub repo is cloned into Claude Code's project workspace | Run `ls -la` (CLI mode) or use `Read` on `README.md` (Cowork) at the workspace root — should see `package.json`, `.git/`, and whatever Lovable scaffolded. If the workspace is empty, the student skipped the `git clone` step in the m0-local-setup file. Send them back to that file. |
+| F2 | A GitHub Personal Access Token with `Contents: Write` scope is configured for this workspace | Easiest active check: have Claude Code make a no-op commit and push (e.g. add a single space to a comment in `README.md`, `git commit -m 'F2 PAT check'`, `git push origin main`). If push succeeds, F2 is green. If push errors with `403` / `authentication failed` / `Permission to ... denied`, the PAT is missing or doesn't have Write scope. Send the student to https://github.com/settings/personal-access-tokens → grant `Contents: Write` on the single repo, then re-paste into Claude Code. |
+| F3 | The F2 test commit triggered a Vercel re-deploy | After F2 push lands, check `mcp__vercel__*` for the latest deployment on this project — should be `Ready` (or `Building` if very recent) with a commit SHA matching the F2 commit. If Vercel didn't pick it up, the GitHub→Vercel integration (set up in `m0-landing-page-prerequisites`) is broken — re-link in Vercel project → Settings → Git. |
+
+If F1 fails: stop. The student hasn't completed the m0-local-setup bridge yet — that file walks through cloning the repo into Cowork. Without it, M1's Step 1 (Vite→Next conversion) has nothing to edit.
+
+If F2 fails: PAT setup is the most common failure mode. The token must have `Contents: Write` on the specific repo — `Read-only` (the default) is not enough. The m0-local-setup file shows the exact GitHub settings page to use.
+
+If F3 fails: the repo is cloned and the PAT works, but Vercel isn't watching this repo's `main` branch. Fix it in Vercel before starting M1, otherwise every M1 commit will silently fail to deploy.
+
 ---
 
 ## Reporting
@@ -211,8 +227,13 @@ Section E — Supabase project + auth
   E3 Vercel has Supabase env vars      ✅
   E4 Sign-up/in works + user appears   ✅  (manually verified)
 
+Section F — Cowork workspace + GitHub PAT
+  F1 Repo cloned in workspace          ✅
+  F2 PAT push works                    ✅
+  F3 Vercel re-deployed from F2 push   ✅
+
 =====================================
-Verdict: 17/17 pass
+Verdict: 20/20 pass
 M0 status: READY for M1
 ```
 
