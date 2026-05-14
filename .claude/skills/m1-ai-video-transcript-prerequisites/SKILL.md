@@ -7,7 +7,7 @@ description: One-time external-account + EC2 setup the student needs BEFORE star
 
 ## What this skill does
 
-Adds two accounts on top of M0's four (GitHub / Lovable / Supabase / Vercel) and provisions one Ubuntu EC2 instance that runs the worker for the rest of M1. **No SSH. No key pair. No PEM file. Everything goes through MCP** — Supabase MCP for DB writes, AWS API MCP (`suggest_aws_commands` + `call_aws`) for EC2 lifecycle, AWS Systems Manager (SSM) for in-instance commands.
+Adds two accounts on top of M0's three (GitHub / Supabase / Vercel) and provisions one Ubuntu EC2 instance that runs the worker for the rest of M1. **No SSH. No key pair. No PEM file. Everything goes through MCP** — Supabase MCP for DB writes, AWS API MCP (`suggest_aws_commands` + `call_aws`) for EC2 lifecycle, AWS Systems Manager (SSM) for in-instance commands.
 
 | # | Service | Used for |
 |---|---|---|
@@ -29,7 +29,7 @@ By the end of this skill the student has:
 
 ![AI Video Reader architecture](assets/ai_video_reader_structure.jpg)
 
-*User → GitHub repo → Vercel-hosted Next.js writes to Supabase; the EC2 you provision here reads pending jobs, runs OpenAI Whisper, writes transcripts back.*
+*Cowork (Claude Code) is the orchestrator — Token-authenticated git push to GitHub, plus connector / MCP links to Vercel, Supabase, and the EC2 you provision in this skill. Vercel-hosted Next.js writes to Supabase; the EC2 reads pending jobs, runs OpenAI Whisper, writes transcripts back.*
 
 This prereq builds the EC2; the **main M1 skill** writes the worker code and starts deploying to it. So you (or the student) understands what infrastructure to optimize for: the deploy model is **GitHub-pull + systemd**, no Docker, no CI, no SSH.
 

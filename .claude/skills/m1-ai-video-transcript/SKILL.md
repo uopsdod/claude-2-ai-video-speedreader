@@ -40,29 +40,29 @@ Before starting, the student must have everything from M0 plus the M1 additions:
 | # | Service | Used for | Added in |
 |---|---|---|---|
 | 1 | GitHub | Source control | M0 |
-| 2 | Lovable | UI generation + Vite→Next.js conversion | M0 |
-| 3 | Supabase | Auth + Postgres + RLS | M0 |
-| 4 | Vercel | Auto-deploy Next.js | M0 |
-| 5 | **OpenAI** | Whisper (`whisper-1`) | **M1** |
-| 6 | **AWS** | One Ubuntu EC2 (t3.small) for the worker | **M1** |
+| 2 | Supabase | Auth + Postgres + RLS | M0 |
+| 3 | Vercel | Auto-deploy Next.js | M0 |
+| 4 | **OpenAI** | Whisper (`whisper-1`) | **M1** |
+| 5 | **AWS** | One Ubuntu EC2 (t3.small) for the worker | **M1** |
 
-If 5 or 6 is missing, **stop and load `m1-ai-video-transcript-prerequisites` first**. Do not try to proceed without OpenAI key + EC2.
+If 4 or 5 is missing, **stop and load `m1-ai-video-transcript-prerequisites` first**. Do not try to proceed without OpenAI key + EC2.
 
-## Execution mode: Cowork vs CLI (confirm before Step 1)
+## Execution mode (single path — Claude Code in the repo)
 
-Before starting, ask the student: 「你是用 Cowork 還是本機 CLI 跑 Claude Code？」 Then apply the right column for every step below.
+The M1-prerequisites setup already cloned the student's GitHub repo into Claude Code's project workspace via the GitHub Connector and verified that **edit → commit → push → Vercel auto-deploy** works end-to-end. M1 just keeps using that same loop — all code edits go through Claude Code's `Edit`/`Write` directly on the cloned repo, never through a third-party visual editor.
 
-| Operation | Cowork mode | CLI mode |
-|---|---|---|
-| Apply the Supabase migration (Step 2) | `mcp__supabase_remote__apply_migration` (gated by 'ask' permission) | `supabase db push` after dropping the SQL into `supabase/migrations/` |
-| Save migration to git for history (Step 2) | Write the .sql via Lovable's editor (or commit via GitHub web UI) | `git add supabase/migrations/<file>.sql && git commit && git push` |
-| Inspect tables / row state | `mcp__supabase_remote__list_tables` / `execute_sql` | `supabase db execute` or dashboard |
-| Edit the Next.js code (Steps 1, 3, 4) | Edit through Lovable's editor; commit via Lovable's Git panel | Edit locally with Claude Code Edit/Write, `git push` |
-| Push to GitHub | Lovable auto-syncs on save | `git push origin main` |
-| Run commands on the EC2 (Step 6) | `call_aws ssm send-command` via AWS API MCP — **no SSH** | Same: `aws ssm send-command` from local terminal |
-| Verify Vercel deploy | `mcp__vercel__*` | Browser to `<vercel-url>` or `vercel inspect` |
+| Operation | How |
+|---|---|
+| Edit the Next.js code (Steps 1, 3, 4) | Claude Code `Edit`/`Write` in the cloned repo, then `git add && git commit && git push` |
+| Push to GitHub | `git push origin main` (uses the GitHub Personal Access Token configured during M0 setup) |
+| Apply the Supabase migration (Step 2) | `mcp__supabase_remote__apply_migration` (Cowork) **or** `supabase db push` (local CLI). Either way, also commit the .sql under `supabase/migrations/` |
+| Inspect tables / row state | `mcp__supabase_remote__list_tables` / `execute_sql`, or `supabase db execute`, or the Supabase dashboard |
+| Run commands on the EC2 (Step 6) | `call_aws ssm send-command` via AWS API MCP — **no SSH**. Local-CLI alternative: same call via `aws ssm send-command` |
+| Verify Vercel deploy | `mcp__vercel__*`, or browser to `<vercel-url>` |
 
-The conversational flow below is the same in both modes — only the tool choices differ. **There is no SSH path** in either mode; M1 prereq stood up an SSM-managed EC2 specifically so we don't need it.
+**There is no SSH path** — M1 prereq stood up an SSM-managed EC2 specifically so we don't need one.
+
+If `git clone` / `git push` is not yet working in this workspace, **stop** and walk the student back through `project-ai-video-reader-m0-local-setup-and-checklist` (specifically the GitHub Personal Access Token step) before continuing.
 
 ## How the code is organized + how it deploys
 
@@ -70,7 +70,7 @@ Before walking the steps, the student should understand the moving parts. M1 is 
 
 ![AI Video Reader architecture](assets/ai_video_reader_structure.jpg)
 
-*User → GitHub repo → Vercel-hosted Next.js writes to Supabase; AWS EC2 worker reads pending jobs, runs OpenAI Whisper, writes transcripts back.*
+*Cowork (Claude Code) sits in the center: it pushes code to the GitHub repo via a Personal Access Token, and connects directly to Vercel, Supabase, and the AWS EC2 worker through Cowork connectors / MCPs. Vercel-hosted Next.js writes to Supabase; the EC2 worker reads pending jobs, runs OpenAI Whisper, writes transcripts back.*
 
 ### One repo, two deploy targets
 
@@ -101,8 +101,8 @@ One repo, two runtimes, zero coordination needed between the two deploys — the
 
 The full update loop, from "I edited `worker.py`" to "the new code is running on EC2":
 
-1. **Author** the code (Cowork: edit via Lovable's editor or Claude's Edit tool; CLI: edit locally with Claude Code).
-2. **Push** to GitHub (Lovable auto-syncs on save; CLI: `git push origin main`).
+1. **Author** the code locally — edit in the cloned repo via Claude Code (`Edit`/`Write`) or your editor.
+2. **Push** to GitHub: `git push origin main`.
 3. **Pull on the EC2** via Cowork — *one* MCP call:
    ```
    call_aws ssm send-command --instance-ids "$INSTANCE_ID" --document-name AWS-RunShellScript \
@@ -156,13 +156,13 @@ The skill is conversational — drive the student through 7 steps. Don't dump al
 
 ### Step 1 — Convert M0's Vite SPA to Next.js 16
 
-M0 leaves the student on a Vite SPA. M1's API route (`/api/jobs`) needs Next.js route handlers, which Vite doesn't have. We convert with one Lovable prompt.
+M0 leaves the student on a Vite SPA, already cloned into this Claude Code project workspace via the GitHub Connector. M1's API route (`/api/jobs`) needs Next.js route handlers, which Vite doesn't have. We convert it by having Claude Code edit the cloned repo directly, then `git push` to GitHub so Vercel re-deploys.
 
 Tell the student verbatim:
 
-> 「M0 跑出來的是 Vite SPA。M1 要加 server-side API route（讓使用者送出影片時，後端能驗證身份、寫 Supabase），這在純 Vite 做不到 — 我們得轉成 Next.js 16。在 Lovable 跑這個 prompt：」
+> 「M0 跑出來的是 Vite SPA。M1 要加 server-side API route（讓使用者送出影片時，後端能驗證身份、寫 Supabase），這在純 Vite 做不到 — 我們得轉成 Next.js 16。把下面這個 prompt 完整貼進來，我會直接改你 repo 裡的檔案，然後 push 上 GitHub。」
 
-Then paste this prompt for the student to copy into Lovable verbatim:
+Then run Claude Code with this prompt verbatim (the same model that's reading this skill executes it):
 
 ```
 Convert this project from Vite to Next.js 16 with the App Router. Specifically:
@@ -183,19 +183,26 @@ Convert this project from Vite to Next.js 16 with the App Router. Specifically:
 6. Keep all the visual design from the Vite version. The landing page text, hero, features, footer should look identical to the deployed M0 page. Sign-up / sign-in / sign-out flows must continue to work end-to-end against the same Supabase project.
 
 After this conversion:
-- `npm run build` should produce a .next directory.
+- The repo's filesystem in this workspace contains an `app/` directory and `package.json` lists `"next": "^16"`.
 - Vercel should auto-detect Framework Preset = Next.js (NOT Vite) on the next push.
-- Sign-up / sign-in / sign-out must still work in the Lovable preview AND on the Vercel deploy.
+- Sign-up / sign-in / sign-out must still work on the Vercel deploy after the push lands.
+```
+
+After Claude Code finishes editing, commit and push:
+
+```bash
+git add -A
+git commit -m "M1 Step 1: convert Vite SPA to Next.js 16 App Router"
+git push origin main
 ```
 
 **Verify before moving on:**
 
-- Lovable preview: sign-up / sign-in / sign-out still work.
-- The repo now contains an `app/` directory and `package.json` shows `"next": "^16.x"` (CLI mode: `gh api repos/<owner>/<repo>/contents/package.json --jq '.content' | base64 -d | grep '"next"'`; Cowork mode: open `package.json` on github.com).
-- Vercel re-deploys after the conversion commit lands. The Vercel project's Framework Preset should auto-flip to **Next.js** — if it doesn't, manually set it (Vercel project → Settings → General → Framework Preset → Next.js).
-- After the Vercel re-deploy, sign-up / sign-in still work on the live URL.
+- The cloned repo now contains an `app/` directory and `package.json` shows `"next": "^16.x"` (Claude Code can `grep '"next"' package.json` directly).
+- Vercel re-deploys after the conversion commit lands. Check with `mcp__vercel__*` that the latest deployment for this project is **Ready**, and that the Framework Preset auto-flipped to **Next.js** — if it didn't, set it manually in the Vercel dashboard (project → Settings → General → Framework Preset → Next.js) and trigger a redeploy.
+- Open the live URL: sign-up / sign-in / sign-out still work.
 
-If sign-up breaks: re-prompt Lovable with 「Sign-up flow broke after the Next.js conversion. Restore Supabase auth using @supabase/ssr — make sure middleware.ts refreshes the session cookie and that the Sign In page reads from lib/supabase/server.ts. Keep the project as Next.js 16 App Router.」
+If sign-up breaks: re-run Claude Code with 「Sign-up flow broke after the Next.js conversion. Restore Supabase auth using @supabase/ssr — make sure middleware.ts refreshes the session cookie and that the Sign In page reads from lib/supabase/server.ts. Keep the project as Next.js 16 App Router.」 Then commit + push and re-check the Vercel deploy.
 
 ### Step 2 — Apply the M1 Supabase schema (and save it to git)
 
@@ -254,10 +261,10 @@ create policy "users read own sessions" on public.job_sessions
 
 Apply + commit (both modes):
 
-1. **Save the .sql to the repo** at `supabase/migrations/20260513000000_m1_jobs_and_sessions.sql` (Cowork: edit through Lovable, push via Lovable's Git panel; CLI: write the file with Claude Code Edit/Write, `git add`, `git commit -m 'M1 schema'`, `git push`).
+1. **Save the .sql to the repo** at `supabase/migrations/20260513000000_m1_jobs_and_sessions.sql` — Claude Code writes the file directly in the cloned repo, then: `git add supabase/migrations/20260513000000_m1_jobs_and_sessions.sql && git commit -m 'M1 schema' && git push`.
 2. **Apply to remote Supabase:**
-   - **Cowork mode:** call `mcp__supabase_remote__apply_migration` with `name = "m1_jobs_and_sessions"` and `query = <the SQL above>`. Permission gate is "ask" — confirm the prompt.
-   - **CLI mode:** `supabase db push` from the student's repo root.
+   - **Cowork (recommended):** call `mcp__supabase_remote__apply_migration` with `name = "m1_jobs_and_sessions"` and `query = <the SQL above>`. Permission gate is "ask" — confirm the prompt.
+   - **Local CLI alternative:** `supabase db push` from the student's repo root.
 
 Don't skip step 1 even though step 2 already mutates the database — git is your only audit log of "what does this Supabase project's schema actually look like, and how did it get there?"
 
@@ -267,13 +274,13 @@ Don't skip step 1 even though step 2 already mutates the database — git is you
 - **Negative check** — confirm we kept M1 small. These columns must NOT exist anywhere: `subtitle_srt_content`, `subtitle_vtt_content`, any `*_reviewed` column, `error_message`. If any of those appear, the student copied the wrong migration; re-apply this one.
 - `select count(*) from jobs` returns 0 (no rows yet).
 
-### Step 3 — Add the `/upload` page in Lovable
+### Step 3 — Add the `/upload` page
 
 Tell the student verbatim:
 
-> 「現在 schema 有了，我們在 web 上加一個 /upload 頁面，讓登入後的使用者可以送出影片 URL。」
+> 「現在 schema 有了，我們在 web 上加一個 /upload 頁面，讓登入後的使用者可以送出影片 URL。我直接在你的 repo 加檔案，然後 push 上 GitHub。」
 
-Paste this prompt for the student to copy into Lovable:
+Run Claude Code in the cloned repo with this prompt verbatim:
 
 ```
 Add a new authenticated page at /upload to the existing Next.js 16 app.
@@ -301,17 +308,25 @@ Requirements:
 4. Add a link to /upload in the header of /app (the post-login dashboard) so signed-in users can find it.
 ```
 
+After Claude Code edits the files, commit and push:
+
+```bash
+git add -A
+git commit -m "M1 Step 3: add /upload page"
+git push origin main
+```
+
 **Verify before moving on:**
 
-- Lovable preview: navigate to `/upload`, see the form, see the empty-state message ("No transcriptions yet...").
+- Vercel auto-deploys; check the latest deploy is **Ready** via `mcp__vercel__*`.
+- On the live URL, sign in and navigate to `/upload` — see the form and the empty-state message ("No transcriptions yet...").
 - Sign out and try to visit `/upload` directly — should redirect to `/sign-in`.
-- Vercel preview deploys; same checks pass on the Vercel URL.
 
 The form's POST will fail with a 404 right now — that's expected. We add the route handler in Step 4.
 
 ### Step 4 — Add the `/api/jobs` route handler
 
-Tell the student to create this file in their repo (Cowork mode: edit through Lovable; CLI mode: Claude Code Edit/Write or hand-edit).
+Have Claude Code create this file in the cloned repo:
 
 **File path:** `app/api/jobs/route.ts`
 
@@ -676,7 +691,7 @@ WantedBy=multi-user.target
 
 **Verify before moving on:**
 
-The student commits all four files (`requirements.txt`, `worker.py`, `distributor.py`, `m1-distributor.service`) to their repo and pushes. CLI mode: `git add worker/ && git commit -m 'M1 worker' && git push`. Cowork mode: edit through Lovable's Git panel or upload via the GitHub web UI.
+Claude Code writes all four files (`requirements.txt`, `worker.py`, `distributor.py`, `m1-distributor.service`) into `worker/` in the cloned repo, then commit + push: `git add worker/ && git commit -m 'M1 worker' && git push`. The EC2 picks up the new code in Step 6 via `git pull` (no SSH, no `scp`).
 
 ### Step 6 — Deploy + run the worker on EC2 (via SSM, no SSH)
 
@@ -760,7 +775,7 @@ Once the smoke test passes, load `m1-ai-video-transcript-checklist` and walk thr
 ## Things to watch out for (common mistakes)
 
 1. **Skipping the Vite→Next.js conversion.**
-   M0's Vite SPA cannot host `/api/jobs`. If you try to keep Vite, you'll need a separate backend on the EC2 (FastAPI + CORS) and divergent env-var handling. Don't go down that path — the conversion is one Lovable prompt and matches the rest of the course (and the production reference).
+   M0's Vite SPA cannot host `/api/jobs`. If you try to keep Vite, you'll need a separate backend on the EC2 (FastAPI + CORS) and divergent env-var handling. Don't go down that path — the conversion is one Claude Code prompt against the cloned repo and matches the rest of the course (and the production reference).
 
 2. **Putting `SUPABASE_SECRET_KEY` in a `NEXT_PUBLIC_*` var.**
    The Supabase Secret key (`sb_secret_*`) bypasses RLS. Anyone with it owns the database. It must only appear server-side. Keep it as `SUPABASE_SECRET_KEY`, never `NEXT_PUBLIC_SUPABASE_SECRET_KEY`. (The Publishable key — `sb_publishable_*` — is the one that's safe in `NEXT_PUBLIC_*` env vars.)
@@ -769,7 +784,7 @@ Once the smoke test passes, load `m1-ai-video-transcript-checklist` and walk thr
    The whole point of M1 prereq §2.3 was to keep `OPENAI_API_KEY` / `SUPABASE_SECRET_KEY` out of git, out of `user-data`, out of the EC2 filesystem. If you find yourself about to write a `.env` file on the EC2, or paste a key into a `cloud-init` script, or commit secrets to GitHub: stop. Add the value to Secrets Manager via `call_aws secretsmanager create-secret` (or `put-secret-value` to update) and read it via `boto3.client("secretsmanager").get_secret_value(SecretId=<name>)["SecretString"]`.
 
 4. **Generating SRT/VTT in M1.**
-   Production does, M1 deliberately doesn't. If Lovable proposes adding SRT timestamps to the schema or worker, block it — that complexity is not in scope for this milestone.
+   Production does, M1 deliberately doesn't. If Claude Code proposes adding SRT timestamps to the schema or worker, block it — that complexity is not in scope for this milestone.
 
 5. **Adding LLM cleanup steps in M1.**
    The production pipeline runs Whisper output through Claude (block-combining) and ChatGPT (typo + semantic + proofread). M1 is intentionally raw — the student sees Whisper's actual output, warts and all. The cleanup pipeline is a future milestone.
@@ -788,7 +803,7 @@ Once the smoke test passes, load `m1-ai-video-transcript-checklist` and walk thr
 
 ## Expected duration
 
-A well-paced student should finish M1 in **60–120 minutes** (longer if it's their first AWS interaction). Step 1 (Vite→Next conversion) is the highest-risk step — if Lovable's conversion breaks auth, debug there before touching anything else.
+A well-paced student should finish M1 in **60–120 minutes** (longer if it's their first AWS interaction). Step 1 (Vite→Next conversion) is the highest-risk step — if Claude Code's conversion breaks auth, debug there before touching anything else.
 
 ## Next step
 
@@ -803,7 +818,6 @@ After the M1 checklist passes, tell the student:
 - Next.js 16 route handlers: https://nextjs.org/docs/app/api-reference/file-conventions/route
 - @supabase/ssr cookie pattern: https://supabase.com/docs/guides/auth/server-side/nextjs
 - supabase-best-practice (this repo's skill) — Rule 1: migration files only.
-- lovable-best-practice (this repo's skill) — Rule 2: RPC for cross-table joins (will matter in M2 onward).
 
 ## TODO (filled in by future iterations)
 

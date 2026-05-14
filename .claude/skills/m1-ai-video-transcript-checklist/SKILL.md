@@ -13,7 +13,7 @@ Verifies the student has actually completed M1 — not just *thinks* they have. 
 
 ![AI Video Reader architecture](assets/ai_video_reader_structure.jpg)
 
-*The four pieces this checklist verifies: GitHub repo → Vercel-hosted Next.js writes to Supabase; EC2 worker reads pending jobs, runs OpenAI Whisper, writes transcripts back. Sections A–E below map onto these boxes.*
+*The pieces this checklist verifies, working outward from Cowork (Claude Code): the GitHub repo (Token-pushed), Vercel-hosted Next.js (Connector), Supabase database (Connector / MCP), and the AWS EC2 worker (Connector / SSM) that runs OpenAI Whisper. Sections A–E below map onto these boxes.*
 
 ## Execution mode: Cowork vs CLI (read this first)
 
@@ -104,7 +104,7 @@ If A3 fails: **stop**. The student likely cribbed the production schema, which h
 
 If B1 fails: Vercel deploy is broken. Check the most recent deployment log in Vercel dashboard — most likely cause is the Vite→Next conversion left build errors.
 
-If B2 still shows Vite: the Lovable conversion didn't take. Re-prompt Lovable per `m1-ai-video-transcript` Step 1.
+If B2 still shows Vite: the Vite→Next.js conversion didn't take. Re-run Claude Code in the cloned repo per `m1-ai-video-transcript` Step 1, then commit + push.
 
 ### Section C — EC2 worker host (5 checks, all via SSM)
 
