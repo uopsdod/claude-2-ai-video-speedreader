@@ -64,6 +64,79 @@ Before starting, ask the student: 「你是用 Cowork 還是本機 CLI 跑 Claud
 
 The conversational flow below is the same in both modes — only the tool choices differ. **There is no SSH path** in either mode; M1 prereq stood up an SSM-managed EC2 specifically so we don't need it.
 
+## How the code is organized + how it deploys
+
+Before walking the steps, the student should understand the moving parts. M1 is unusual in that it deploys *one repo* to *two completely different runtimes* — Next.js to Vercel, Python to EC2 — without Docker, CI, or SSH.
+
+### One repo, two deploy targets
+
+Everything lives in the **same GitHub repo** the student created in M0. M1 just adds a `worker/` subdirectory:
+
+```
+<student-repo>/
+├── app/                           ← Next.js web app (M0 + M1 Step 4 added /api/jobs)
+│   └── api/jobs/route.ts
+├── supabase/migrations/
+│   └── 20260513000000_m1_jobs_and_sessions.sql       ← M1 Step 2
+├── worker/                        ← all of this is M1 Step 5
+│   ├── requirements.txt
+│   ├── worker.py
+│   ├── distributor.py
+│   └── m1-distributor.service     ← systemd unit
+└── ...
+```
+
+- **Vercel** auto-deploys `app/` on every `git push`. It ignores `worker/` (no build hook).
+- **The EC2** pulls `worker/` via `git pull`. It ignores `app/`.
+
+One repo, two runtimes, zero coordination needed between the two deploys — they happen independently.
+
+### How `worker/` reaches the EC2 — the deploy model
+
+**GitHub is the artifact registry. AWS SSM `send-command` is the deploy mechanism. systemd is the process supervisor.** No Docker, no CI workflow, no SSH key.
+
+The full update loop, from "I edited `worker.py`" to "the new code is running on EC2":
+
+1. **Author** the code (Cowork: edit via Lovable's editor or Claude's Edit tool; CLI: edit locally with Claude Code).
+2. **Push** to GitHub (Lovable auto-syncs on save; CLI: `git push origin main`).
+3. **Pull on the EC2** via Cowork — *one* MCP call:
+   ```
+   call_aws ssm send-command --instance-ids "$INSTANCE_ID" --document-name AWS-RunShellScript \
+     --parameters 'commands=[
+       "sudo -u ubuntu bash -c \"cd /home/ubuntu/app && git pull\"",
+       "sudo -u ubuntu bash -c \"cd /home/ubuntu/app/worker && ./venv/bin/pip install -r requirements.txt\""
+     ]'
+   ```
+4. **Restart the systemd service** — *one more* MCP call:
+   ```
+   call_aws ssm send-command --instance-ids "$INSTANCE_ID" --document-name AWS-RunShellScript \
+     --parameters 'commands=["sudo systemctl restart m1-distributor.service"]'
+   ```
+
+That's the entire deploy. No `scp`, no `ssh`, no Dockerfile, no GitHub Actions workflow, no CodeDeploy.
+
+### Where each piece was set up
+
+| Piece | Set up in | Lives at |
+|---|---|---|
+| EC2 instance + IAM role + Secrets Manager | M1 prereq §2.0–2.7 | AWS account |
+| `~/app` (the M0 repo cloned to EC2) | M1 prereq §2.7 | EC2 `/home/ubuntu/app` |
+| `worker/venv` (Python 3.12 venv) | M1 prereq §2.7 | EC2 `/home/ubuntu/app/worker/venv` |
+| `worker/*.py` + `requirements.txt` + `*.service` (initial commit) | M1 main Step 5 | GitHub repo `worker/` |
+| `m1-distributor.service` installed at `/etc/systemd/system/` + enabled | M1 main Step 6b | EC2 systemd |
+| `pip install -r requirements.txt` (initial) | M1 main Step 6a | EC2 venv |
+
+After the initial Step 6 setup, every subsequent code change uses just the two-MCP-call loop above. That's the model — internalize it before reading the step-by-step below, because Steps 5–6 are the **first** time through this loop, not the only time.
+
+### Things this deploy model deliberately does NOT have
+
+- **No staging environment.** The student `git pull`s `main` directly to the live EC2. Fine for solo learning; revisit if you onboard real users.
+- **No automated rollback.** A broken `worker.py` makes systemd restart-loop on import error. Recovery: `git revert` + push + repeat the pull/restart.
+- **No CI.** GitHub never builds anything for you. Vercel handles its own auto-deploy of `app/`; the EC2 deploy is fully student-driven via Cowork.
+- **No Docker.** Adds a build step + an image registry. M1 skips it; M4 (serverless milestone) brings Docker + ECR back when the worker moves to Fargate.
+
+OK — now the steps.
+
 ## Conversational flow
 
 The skill is conversational — drive the student through 7 steps. Don't dump all steps at once. After each step, **wait for confirmation** before moving on.
@@ -73,7 +146,7 @@ The skill is conversational — drive the student through 7 steps. Don't dump al
 > 1. `mcp__supabase_remote__list_tables` returns the M0 auth schema.
 > 2. `mcp__vercel__*` tools are loaded (Cowork) or `vercel whoami` succeeds (CLI).
 > 3. AWS API MCP works: `call_aws ssm describe-instance-information --filters "Key=tag:Name,Values=m1-worker"` returns one row with `PingStatus=Online`.
-> 4. SSM Parameter Store has all three M1 secrets: `call_aws ssm get-parameters --names /m1/OPENAI_API_KEY /m1/SUPABASE_URL /m1/SUPABASE_SERVICE_KEY --with-decryption --query 'Parameters[].Name'` returns the three names.
+> 4. AWS Secrets Manager has all four M1 secrets: `call_aws secretsmanager list-secrets --query 'SecretList[?Name==\`openai-api-key\` || Name==\`supabase-url\` || Name==\`supabase-secret-key\` || Name==\`supabase-publishable-key\`].Name'` returns the four names. (The worker.py / distributor.py code in Step 5 only reads three of them — the publishable key is stored for future-milestone use, see M1 prereq §2.3.)
 >
 > If any check fails, switch to `m1-ai-video-transcript-prerequisites` and resolve before continuing. **No SSH is used in M1.**
 
@@ -159,7 +232,7 @@ alter table public.jobs
   foreign key (current_session_id) references public.job_sessions(id);
 
 -- RLS: users only see their own jobs + sessions.
--- The worker connects with the service-role key and bypasses RLS.
+-- The worker connects with the Supabase Secret key (sb_secret_*) and bypasses RLS.
 alter table public.jobs enable row level security;
 alter table public.job_sessions enable row level security;
 
@@ -264,12 +337,12 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: 'video_source_url required' }, { status: 400 })
   }
 
-  // 2. Use the service-role key to insert the job + session rows.
-  // The user has already been authenticated above; service-role bypasses RLS
+  // 2. Use the Supabase Secret key to insert the job + session rows.
+  // The user has already been authenticated above; Secret key bypasses RLS
   // so we can insert in one round-trip without policy ping-pong.
   const admin = createClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_KEY!
+    process.env.SUPABASE_SECRET_KEY!
   )
 
   const { data: job, error: jobErr } = await admin
@@ -310,10 +383,10 @@ Add the env vars (Vercel project → Settings → Environment Variables, AND the
 ```
 NEXT_PUBLIC_SUPABASE_URL=https://<ref>.supabase.co
 NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=sb_publishable_...    # browser-safe, RLS-gated
-SUPABASE_SERVICE_KEY=eyJhb...                              # server-only, FULL ACCESS — never ship to browser
+SUPABASE_SECRET_KEY=sb_secret_...                         # server-only, FULL ACCESS — never ship to browser
 ```
 
-> ⚠️ **`SUPABASE_SERVICE_KEY` is a server-only secret.** Never prefix it with `NEXT_PUBLIC_`. Never reference it in a Client Component. Anyone who gets this key has full access to the database, bypassing all RLS.
+> ⚠️ **`SUPABASE_SECRET_KEY` is a server-only secret.** Never prefix it with `NEXT_PUBLIC_`. Never reference it in a Client Component. Anyone who gets this key has full access to the database, bypassing all RLS.
 
 After adding env vars in Vercel, **redeploy** — Vercel doesn't re-evaluate env vars for already-built deployments.
 
@@ -343,7 +416,7 @@ boto3>=1.34.0
 yt-dlp>=2024.0.0
 ```
 
-> No `python-dotenv`. The worker reads its secrets from **AWS SSM Parameter Store** (set up in M1 prereq) using `boto3`. There is no `.env` file on the EC2 — it would be one more thing to keep out of git, one more thing to rotate when leaked. The IAM instance profile gives the EC2 permission to read `/m1/*` parameters; nothing else can.
+> No `python-dotenv`. The worker reads its secrets from **AWS Secrets Manager** (set up in M1 prereq §2.3) using `boto3`. There is no `.env` file on the EC2 — it would be one more thing to keep out of git, one more thing to rotate when leaked. The IAM instance profile gives the EC2 permission to read four secret names — `openai-api-key`, `supabase-url`, `supabase-secret-key`, `supabase-publishable-key` — and nothing else. (M1's worker.py only fetches the first three; `supabase-publishable-key` is stored for future-milestone use.)
 
 **`worker/worker.py`** (~120 lines, full file):
 
@@ -353,10 +426,9 @@ M1 worker: polls one job at a time, downloads the video, runs Whisper,
 writes TXT back to job_sessions.subtitle_txt_content.
 
 Started by distributor.py (one Popen per pending job). Reads JOB_ID from env.
-Reads OPENAI_API_KEY / SUPABASE_URL / SUPABASE_SERVICE_KEY from AWS SSM
-Parameter Store at /m1/* — the EC2's IAM instance profile grants the
-necessary `ssm:GetParameter` + `kms:Decrypt` permissions, so no secrets
-ever live on disk.
+Reads OPENAI_API_KEY / SUPABASE_URL / SUPABASE_SECRET_KEY from AWS Secrets
+Manager — the EC2's IAM instance profile grants `secretsmanager:GetSecretValue`
+on exactly those three secret names, so no credentials ever live on disk.
 """
 import os
 import sys
@@ -370,18 +442,23 @@ from openai import OpenAI
 from supabase import create_client
 
 
+def _get_secret(client, name: str) -> str:
+    """Fetch one Secrets Manager secret by name (returns the SecretString)."""
+    return client.get_secret_value(SecretId=name)["SecretString"]
+
+
 def _load_secrets() -> dict[str, str]:
-    """Pull /m1/* from SSM Parameter Store (with KMS decrypt for SecureString)."""
-    ssm = boto3.client("ssm")
-    resp = ssm.get_parameters(
-        Names=["/m1/SUPABASE_URL", "/m1/SUPABASE_SERVICE_KEY", "/m1/OPENAI_API_KEY"],
-        WithDecryption=True,
-    )
-    return {p["Name"].rsplit("/", 1)[1]: p["Value"] for p in resp["Parameters"]}
+    """Pull the three M1 secrets from AWS Secrets Manager."""
+    sm = boto3.client("secretsmanager")
+    return {
+        "OPENAI_API_KEY": _get_secret(sm, "openai-api-key"),
+        "SUPABASE_URL": _get_secret(sm, "supabase-url"),
+        "SUPABASE_SECRET_KEY": _get_secret(sm, "supabase-secret-key"),
+    }
 
 
 _secrets = _load_secrets()
-db = create_client(_secrets["SUPABASE_URL"], _secrets["SUPABASE_SERVICE_KEY"])
+db = create_client(_secrets["SUPABASE_URL"], _secrets["SUPABASE_SECRET_KEY"])
 openai_client = OpenAI(api_key=_secrets["OPENAI_API_KEY"])
 
 # OpenAI Whisper has a 25 MB file-size limit. 10 minutes of 64 kbps mono mp3 ~= 4.8 MB,
@@ -510,8 +587,9 @@ M1 distributor: polls jobs.status='pending' every 10 s, spawns one worker.py
 process per pending job. Worker flips status to 'downloading' immediately,
 so the next poll skips it.
 
-Reads SUPABASE_URL + SUPABASE_SERVICE_KEY from AWS SSM Parameter Store.
-Same auth model as worker.py — IAM instance profile grants /m1/* read.
+Reads SUPABASE_URL + SUPABASE_SECRET_KEY from AWS Secrets Manager.
+Same auth model as worker.py — IAM instance profile grants
+`secretsmanager:GetSecretValue` on the supabase-* secret names.
 
 Known limitation (acceptable for M1): if worker.py crashes BEFORE flipping
 to 'downloading', the distributor will spawn another worker on the next poll.
@@ -528,16 +606,15 @@ from supabase import create_client
 
 
 def _load_secrets() -> dict[str, str]:
-    ssm = boto3.client("ssm")
-    resp = ssm.get_parameters(
-        Names=["/m1/SUPABASE_URL", "/m1/SUPABASE_SERVICE_KEY"],
-        WithDecryption=True,
-    )
-    return {p["Name"].rsplit("/", 1)[1]: p["Value"] for p in resp["Parameters"]}
+    sm = boto3.client("secretsmanager")
+    return {
+        "SUPABASE_URL": sm.get_secret_value(SecretId="supabase-url")["SecretString"],
+        "SUPABASE_SECRET_KEY": sm.get_secret_value(SecretId="supabase-secret-key")["SecretString"],
+    }
 
 
 _secrets = _load_secrets()
-db = create_client(_secrets["SUPABASE_URL"], _secrets["SUPABASE_SERVICE_KEY"])
+db = create_client(_secrets["SUPABASE_URL"], _secrets["SUPABASE_SECRET_KEY"])
 
 WORKER = Path(__file__).parent / "worker.py"
 PYTHON = sys.executable  # use the same venv we're running in
@@ -647,8 +724,8 @@ call_aws ssm send-command \
 
 Most-common failures and fixes:
 - `NoRegionError` → fix `AWS_DEFAULT_REGION` in `m1-distributor.service`, push, repeat 6a + 6b.
-- `AccessDeniedException` on SSM `GetParameters` → IAM role missing the `m1-ssm-read` inline policy from M1 prereq §2.3. Re-run that `put-role-policy` call.
-- `KeyError: '/m1/...'` → the parameter doesn't exist. Re-check via `call_aws ssm get-parameters --names ... --with-decryption`.
+- `AccessDeniedException` on `secretsmanager:GetSecretValue` → IAM role missing the `m1-secrets-read` inline policy from M1 prereq §2.3. Re-run that `put-role-policy` call.
+- `ResourceNotFoundException: Secrets Manager can't find the specified secret` → one of the three secret names (`openai-api-key`, `supabase-url`, `supabase-secret-key`) wasn't created. Re-check via `call_aws secretsmanager list-secrets --query 'SecretList[].Name'`. Re-create the missing one via `call_aws secretsmanager create-secret --name <name> --secret-string '<value>'`.
 
 #### 6c — Smoke test (end-to-end)
 
@@ -681,11 +758,11 @@ Once the smoke test passes, load `m1-ai-video-transcript-checklist` and walk thr
 1. **Skipping the Vite→Next.js conversion.**
    M0's Vite SPA cannot host `/api/jobs`. If you try to keep Vite, you'll need a separate backend on the EC2 (FastAPI + CORS) and divergent env-var handling. Don't go down that path — the conversion is one Lovable prompt and matches the rest of the course (and the production reference).
 
-2. **Putting `SUPABASE_SERVICE_KEY` in a `NEXT_PUBLIC_*` var.**
-   The service-role key bypasses RLS. Anyone with it owns the database. It must only appear server-side. Keep it as `SUPABASE_SERVICE_KEY`, never `NEXT_PUBLIC_SUPABASE_SERVICE_KEY`.
+2. **Putting `SUPABASE_SECRET_KEY` in a `NEXT_PUBLIC_*` var.**
+   The Supabase Secret key (`sb_secret_*`) bypasses RLS. Anyone with it owns the database. It must only appear server-side. Keep it as `SUPABASE_SECRET_KEY`, never `NEXT_PUBLIC_SUPABASE_SECRET_KEY`. (The Publishable key — `sb_publishable_*` — is the one that's safe in `NEXT_PUBLIC_*` env vars.)
 
-3. **Hardcoding secrets anywhere outside SSM Parameter Store.**
-   The whole point of M1 prereq §2.3 was to keep `OPENAI_API_KEY` / `SUPABASE_SERVICE_KEY` out of git, out of `user-data`, out of the EC2 filesystem. If you find yourself about to write a `.env` file on the EC2, or paste a key into a `cloud-init` script, or commit secrets to GitHub: stop. Add the value to SSM Parameter Store as a SecureString and read it via `boto3.client("ssm").get_parameters(WithDecryption=True)`.
+3. **Hardcoding secrets anywhere outside AWS Secrets Manager.**
+   The whole point of M1 prereq §2.3 was to keep `OPENAI_API_KEY` / `SUPABASE_SECRET_KEY` out of git, out of `user-data`, out of the EC2 filesystem. If you find yourself about to write a `.env` file on the EC2, or paste a key into a `cloud-init` script, or commit secrets to GitHub: stop. Add the value to Secrets Manager via `call_aws secretsmanager create-secret` (or `put-secret-value` to update) and read it via `boto3.client("secretsmanager").get_secret_value(SecretId=<name>)["SecretString"]`.
 
 4. **Generating SRT/VTT in M1.**
    Production does, M1 deliberately doesn't. If Lovable proposes adding SRT timestamps to the schema or worker, block it — that complexity is not in scope for this milestone.

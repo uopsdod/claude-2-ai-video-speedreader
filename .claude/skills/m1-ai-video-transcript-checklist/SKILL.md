@@ -65,6 +65,14 @@ call_aws ssm describe-instance-information --instance-information-filter-list "k
 
 `PingStatus` must be `Online`. If not, the IAM instance profile is misconfigured — back to M1 prereq §2.2.
 
+Confirm the four M1 secrets exist in Secrets Manager:
+
+```
+call_aws secretsmanager list-secrets --query 'SecretList[?Name==`openai-api-key` || Name==`supabase-url` || Name==`supabase-secret-key` || Name==`supabase-publishable-key`].Name'
+```
+
+Must return all four names. If any of the first three (`openai-api-key`, `supabase-url`, `supabase-secret-key`) is missing, the worker will crash on first poll with `ResourceNotFoundException`. If `supabase-publishable-key` is missing, the worker still runs (M1 doesn't read it) but follow-on milestones may break — re-create it via M1 prereq §2.3.
+
 ---
 
 ## Checklist
@@ -103,10 +111,10 @@ All Section C checks run as one consolidated `send-command` per check (via `call
 | C1 | EC2 reachable via SSM | `call_aws ssm send-command --instance-ids "$INSTANCE_ID" --document-name AWS-RunShellScript --parameters 'commands=["echo reachable"]'` returns `reachable` after polling for the result. (If `send-command` itself fails with `InvalidInstanceId`, the instance isn't SSM-managed — back to M1 prereq.) |
 | C2 | ffmpeg installed | `commands=["ffmpeg -version \| head -1"]` returns a version line starting with `ffmpeg version`. |
 | C3 | Python 3.12 + venv ready | `commands=["ls /home/ubuntu/app/worker/venv/bin/python && /home/ubuntu/app/worker/venv/bin/python --version"]` returns the python path and `Python 3.12.x`. |
-| C4 | Worker code + service file present | `commands=["ls /home/ubuntu/app/worker/worker.py /home/ubuntu/app/worker/distributor.py /home/ubuntu/app/worker/requirements.txt /home/ubuntu/app/worker/m1-distributor.service && [ ! -f /home/ubuntu/app/worker/.env ] && echo 'no .env (good)' \|\| echo 'WARNING: .env exists, secrets should live in SSM Parameter Store, not on disk'"]` lists all four worker files **and** confirms there is no `.env` file (M1 reads secrets from SSM Parameter Store; a `.env` on disk indicates the student copy-pasted from an older version of the skill). |
+| C4 | Worker code + service file present | `commands=["ls /home/ubuntu/app/worker/worker.py /home/ubuntu/app/worker/distributor.py /home/ubuntu/app/worker/requirements.txt /home/ubuntu/app/worker/m1-distributor.service && [ ! -f /home/ubuntu/app/worker/.env ] && echo 'no .env (good)' \|\| echo 'WARNING: .env exists, secrets should live in AWS Secrets Manager, not on disk'"]` lists all four worker files **and** confirms there is no `.env` file (M1 reads secrets from AWS Secrets Manager via `boto3`; a `.env` on disk indicates the student copy-pasted from an older version of the skill). |
 | C5 | Distributor service running | `commands=["sudo systemctl is-active m1-distributor.service && sudo journalctl -u m1-distributor.service -n 5 --no-pager"]` returns `active` followed by the last 5 log lines. The log should include a recent `distributor: polling every 10s` or `spawned worker for job ...` line (proof the loop is alive, not just the process started). |
 
-If C5 fails but C1–C4 pass: the service is installed but not running. Start it via SSM: `call_aws ssm send-command ... 'commands=["sudo systemctl start m1-distributor.service"]'`. If it crashes immediately, read `journalctl -u m1-distributor.service -n 50 --no-pager` (most-likely cause: `AWS_DEFAULT_REGION` wrong in the unit file, or IAM role missing `ssm:GetParameter` on `/m1/*`).
+If C5 fails but C1–C4 pass: the service is installed but not running. Start it via SSM: `call_aws ssm send-command ... 'commands=["sudo systemctl start m1-distributor.service"]'`. If it crashes immediately, read `journalctl -u m1-distributor.service -n 50 --no-pager` (most-likely causes: `AWS_DEFAULT_REGION` wrong in the unit file; IAM role missing the `m1-secrets-read` inline policy granting `secretsmanager:GetSecretValue`; or one of the three secret names — `openai-api-key`, `supabase-url`, `supabase-secret-key` — not yet created in Secrets Manager).
 
 ### Section D — End-to-end transcribe (4 checks)
 
@@ -200,4 +208,4 @@ Two M1-specific failure modes this guards against:
 
 - [ ] Wrap the C2–C5 SSM-send-command pattern into a single composite check with a polling helper, instead of one `send-command` per row, to cut latency.
 - [ ] Tighten D4 from "looks like text in the right language" into a deterministic language-detect call.
-- [ ] Add a check that grep'ing the repo for `OPENAI_API_KEY=sk-` / `SUPABASE_SERVICE_KEY=eyJ` returns zero hits (defense-in-depth — secrets should only live in SSM Parameter Store, never in committed code).
+- [ ] Add a check that grep'ing the repo for `sk-proj-` / `sk-` / `eyJhbGciOi` returns zero hits (defense-in-depth — secrets should only live in AWS Secrets Manager, never in committed code).
