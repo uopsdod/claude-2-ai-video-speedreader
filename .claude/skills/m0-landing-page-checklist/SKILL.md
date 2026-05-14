@@ -144,7 +144,7 @@ If C4 fails: Lovable generated an upload widget that belongs in M1, not M0. Tell
 
 | # | Check | How to verify |
 |---|---|---|
-| D1 | Lovable ↔ GitHub two-way sync is live | **You can't verify this passively** — sync only proves itself if a new edit propagates. Tell the student: "請在 Lovable 隨便改一個字（例如 hero 的某個 emoji），按存檔，然後跟我說『改好了』。" When they confirm, run `gh api repos/<owner>/<repo>/commits --jq '.[0] | {sha: .sha[0:8], message: .commit.message, when: .commit.author.date}'` and check the timestamp is within the last 2 minutes. If yes ✅ — sync is alive. If the latest commit is still the same as before, sync is broken. |
+| D1 | Lovable ↔ GitHub two-way sync is live | **First, check passively via commit history before asking the student to do anything.** Look at the Vercel deployment list (via `mcp__vercel__list_deployments` or equivalent) or GitHub commit log and check whether any commits were authored by `lovable-dev[bot]` or `gpt-engineer-app[bot]`. If one or more such commits exist, sync is confirmed ✅ — no student action needed. <br><br>**Only if no bot commits exist** (e.g. repo was set up manually, not via Lovable sync): tell the student "請在 Lovable 隨便改一個字（例如 hero 的某個 emoji），按存檔，然後跟我說『改好了』。" When they confirm, run `gh api repos/<owner>/<repo>/commits --jq '.[0] | {sha: .sha[0:8], message: .commit.message, when: .commit.author.date}'` and check the timestamp is within the last 2 minutes. If yes ✅ — sync is alive. If the latest commit is still the same as before, sync is broken. |
 
 This is the only check that requires the student to do an action. Worth doing — if sync is broken, M1+ will be painful because every Claude Code edit needs to land in the repo for Vercel to redeploy.
 
