@@ -38,11 +38,13 @@ That's it. No products, no prices, no migrations, no webhook handlers, no `.env.
 | MCP | Status | Notes |
 |---|---|---|
 | `mcp__supabase_remote__*` | ✅ already installed for M0 | Used to apply the M2 ledger migration |
-| `mcp__vercel__*` | ✅ already installed for M0 | Used to add the three Stripe env vars to the Vercel project |
-| `call_aws` (AWS API MCP) | ✅ already installed for M1 | Only used to redeploy the worker after the duration-check change |
-| **`mcp__stripe__*`** | **add in this skill** | Cowork path for creating products, listing prices, resending events |
+| `mcp__vercel__*` | ✅ already installed for M0 | Used to list deployments and tail logs. **Does NOT support env-var management as of 2026-05** — Stripe env vars go in via the Vercel dashboard. |
+| `call_aws` (AWS API MCP) | ✅ already installed for M1 | Only used to redeploy the worker after the duration-check change. Use the **shorthand** `commands=[...]` form for `--parameters` — the MCP's argv parser breaks on the JSON form. |
+| **`mcp__stripe__*`** | **add in this skill** | Cowork path for creating products, listing prices. **Does NOT support webhook endpoint management as of 2026-05** — the M2 webhook endpoint is created via the Stripe dashboard. |
 
 If you're in **CLI mode** and don't want to install the Stripe MCP, the `stripe` CLI (`brew install stripe/stripe-cli/stripe` on macOS, or the Linux equivalent) is sufficient for all of M2 — used for `stripe products create`, `stripe prices create`, `stripe webhook_endpoints create`, and `stripe events resend`. (Main M2 doesn't use `stripe listen` — the webhook test goes against a real Stripe **dashboard endpoint** pointed at Vercel, not a local forwarder.)
+
+> **Why call out the MCP gaps here?** Past students hit both gaps mid-build and lost time looking for tools that don't exist. The main M2 skill calls these out again at the relevant steps; this matrix is the early heads-up.
 
 ## Section 1 — Create the Stripe sandbox account
 

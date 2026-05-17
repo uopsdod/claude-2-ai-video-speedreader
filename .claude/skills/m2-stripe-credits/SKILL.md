@@ -72,11 +72,11 @@ The **Component** column names the box in the diagram (above) that the operation
 | **Supabase** (Postgres) | Apply M2 migration (Step 4) | `mcp__supabase_remote__apply_migration` (Cowork) or `supabase db push` (CLI). Adds `credits_balance` column, `credit_transactions` + `credit_products` tables, signup-bonus trigger. |
 | **Supabase** (Postgres) | Inspect tables / verify state | `mcp__supabase_remote__list_tables` / `execute_sql`, or `supabase db execute`, or the Supabase dashboard. |
 | **Vercel** (Product Site) | Verify production deploy | `mcp__vercel__*` deployment-list tool, or browser to `<prod-vercel-url>`. |
-| **Vercel** (Product Site) | Add env vars to Production (Steps 2a, 9c) | `mcp__vercel__*` env tool (Cowork) or `vercel env add <var> production` (CLI). All Stripe env vars go in Production scope, with `sk_test_*` / `pk_test_*` / `whsec_*` (sandbox) values. |
+| **Vercel** (Product Site) | Add env vars to Production (Steps 2a, 9c) | **Vercel MCP does NOT expose env-var management** as of 2026-05 — present-day Vercel MCP only does deploy/list/log. The primary path is the **Vercel dashboard** (Project → Settings → Environment Variables) or `vercel env add <var> production` in CLI mode. If a future MCP version exposes env tools, prefer those. All Stripe env vars go in Production scope, with `sk_test_*` / `pk_test_*` / `whsec_*` (sandbox) values. |
 | **Stripe** (sandbox) | Create the three credit-tier prices (Step 3) | `mcp__stripe__*` `create_product` + `create_price` (Cowork) or `stripe products create` + `stripe prices create` (CLI). |
-| **Stripe** (sandbox) | Create webhook dashboard endpoint (Step 9b) | `mcp__stripe__*` `create_webhook_endpoint` (Cowork) or Stripe dashboard → Developers → Webhooks → Add endpoint (CLI). One endpoint pointed at `<prod-vercel-url>/api/stripe/webhook`. |
+| **Stripe** (sandbox) | Create webhook dashboard endpoint (Step 9b) | **Stripe MCP does NOT expose webhook endpoint management** as of 2026-05 — only Products / Prices / Customers / etc. The primary path is the **Stripe dashboard** → Developers → Webhooks → Add endpoint, in both Cowork and CLI. One endpoint pointed at `<prod-vercel-url>/api/stripe/webhook`. |
 | **Stripe** (sandbox) | Test webhooks end-to-end (Step 9) | Trigger via real test-card checkout against the production URL; verify in Stripe dashboard → Events + Vercel runtime logs + Supabase row. |
-| **AWS EC2** (Worker) | Pull new worker code + restart service (Steps 7c, 10a) | `call_aws ssm send-command` — JSON-form parameters, same pattern as M1. |
+| **AWS EC2** (Worker) | Pull new worker code + restart service (Steps 7c, 10a) | `call_aws ssm send-command` — **use the shorthand form** `--parameters commands=["cmd1","cmd2"]` with simple commands. The `aws-best-practice` JSON-form (`--parameters '{"commands":["..."]}'`) is reliable with `aws-cli` directly, but the `call_aws` MCP's argv parser strips the JSON quoting; nested-quote and `&&` patterns fail. Keep each command simple — no `&&`, no nested quotes — and run separate commands instead. |
 | **Cowork** (Claude Code) | Orchestrator only — never the *target* of a change | Drives the operations above via MCPs / Connectors (`mcp__supabase_*`, `mcp__vercel__*`, `mcp__stripe__*`, `call_aws`) and via `Edit`/`Write` on the cloned repo. If you're using the Claude Code CLI instead of Cowork, the same operations work — just through local `git` / `vercel` / `supabase` / `stripe` CLIs instead. |
 
 **No new SSH paths.** No new AWS infra. M2 is mostly app-code + one webhook + one EC2 pull.
@@ -127,15 +127,30 @@ EC2 worker picks up the job
                  └─ UPDATE profiles.credits_balance -= minutes
 ```
 
+## Project conventions to match (canonical for this course)
+
+Before writing any code in Steps 2–8, **inspect your M1 repo** and match what's already there. This skill assumes the M1 skill produced a project with these conventions; if yours diverges, use your project's actual values everywhere this skill names them.
+
+| Convention | This course's canonical default | Where to confirm | If yours differs |
+|---|---|---|---|
+| TypeScript path alias for shared code | `@/*` → `./src/*` (Next.js 16 default with `src/` directory) — so `lib/stripe.ts` lives at **`src/lib/stripe.ts`** | `tsconfig.json` → `compilerOptions.paths` | If your alias maps to `./` (no `src/`), put files at `lib/stripe.ts`, `app/credits/page.tsx`, etc. Substitute throughout. |
+| Supabase service-role env var name | **`SUPABASE_SECRET_KEY`** (what M1 prereq sets) | `.env.example` or Vercel Production env list | If M1 used `SUPABASE_SERVICE_ROLE_KEY` instead, use that name everywhere this skill says `SUPABASE_SECRET_KEY`. |
+| Header / nav component | Per-page inline header in M1, or a shared component | `grep -r "<header" src/app/` and `src/app/layout.tsx` | If M1 left per-page inline headers, **create `src/components/AppHeader.tsx`** in Step 8 and migrate each page to use it (one refactor for the whole UI). Otherwise patch the existing shared component in place. |
+| Middleware shape | Session-refresh only (`auth.getUser()` + matcher-based exclusion); no `isPublic` redirect helper | `src/middleware.ts` | If your M1 used an `isPublic` redirect pattern, add `/api/stripe/webhook` to the `isPublic` list (as in Step 6c). If matcher-based, add it to the `config.matcher` exclusion regex. Either way, the webhook must NOT pass through `auth.getUser()`. |
+| Package manager + lockfile | **`bun`** with `bun.lock` (what M0 produces) | `ls bun.lock package-lock.json` | If `npm`/`package-lock.json`: the default Vercel build works. If `bun`/`bun.lock`: see Step 2b — you may need to add `"installCommand": "bun install --no-frozen-lockfile"` to `vercel.json` so Vercel can install the new `stripe` dep on first deploy. |
+| `public.profiles` table exists with M0 | M0 only ships the Lovable landing page; **`profiles` is typically NOT yet present** — M1 added it for the user pipeline, but some M1 paths don't | `mcp__supabase_remote__list_tables` — look for `public.profiles` | If `profiles` is missing, Step 4's migration must CREATE it first (template includes `CREATE TABLE IF NOT EXISTS public.profiles` — verify it's there before applying). |
+
+This block exists because real student projects diverge from the skill's reference implementation in lots of small ways after M0/M1. The skill's code snippets below use the canonical defaults; substitute your project's actual values without telling Claude every time.
+
 ## Conversational flow
 
 The skill is conversational — drive the student through **9 steps**. Don't dump all steps at once. After each step, **wait for confirmation** before moving on.
 
 > **Before Step 1:** confirm the student has done `m1-ai-video-transcript-checklist` (M1 fully green) and `m2-stripe-credits-prerequisites` (Stripe sandbox account exists, Stripe MCP authenticated against sandbox — OR `stripe login` is good against sandbox). If either is missing, switch to that skill and come back. Sanity checks:
 >
-> 1. `mcp__supabase_remote__list_tables` returns `profiles` (from M0).
+> 1. `mcp__supabase_remote__list_tables` — note whether `public.profiles` exists. If it does (likely from M1), Step 4's migration will `ADD COLUMN IF NOT EXISTS credits_balance` to it. If it doesn't, Step 4's migration creates it from scratch. Either way works because the migration is idempotent.
 > 2. `mcp__supabase_remote__execute_sql`: `SELECT id, name, credits, price_usd FROM credit_products` — should be empty or non-existent (we'll create it in Step 4).
-> 3. M1 worker is `active`: `call_aws ssm send-command --instance-ids $INSTANCE_ID --document-name AWS-RunShellScript --parameters '{"commands":["sudo systemctl is-active m1-distributor.service"]}'` returns `active`.
+> 3. M1 worker is `active`: `call_aws ssm send-command --instance-ids "$INSTANCE_ID" --document-name AWS-RunShellScript --parameters commands=["sudo systemctl is-active m1-distributor.service"]` returns `active`.
 > 4. Three Stripe sandbox prices exist (Stripe MCP `list_prices` or `stripe prices list`).
 
 ---
@@ -162,15 +177,11 @@ Same `git push origin main` flow as M1 — no feature branch, no preview deploys
 
 Two of the three Stripe env vars can go in now. The third (`STRIPE_WEBHOOK_SECRET`) waits until Step 9, when the Stripe dashboard endpoint exists and gives us a stable `whsec_...`.
 
-**Cowork (Vercel MCP):** ask Claude verbatim:
+> **⚠ Vercel MCP cannot manage env vars (as of 2026-05).** The MCP only exposes deploy/list/log. So the **dashboard is the primary path in both Cowork and CLI modes.** If a future MCP version exposes env tools, prefer those.
 
-> 「幫我把這兩個 env var 加到 Vercel project 的 **Production** scope：
-> - `STRIPE_SECRET_KEY` = `sk_test_...`（從 prereq §1 拿）
-> - `NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY` = `pk_test_...`
->
-> `STRIPE_WEBHOOK_SECRET` 暫時不加，等 Step 9 開好 Stripe dashboard endpoint 之後再加。」
+**Primary path — Vercel dashboard:** open Project → **Settings → Environment Variables**, scope = **Production**, add the two below.
 
-**CLI fallback:**
+**CLI alternative (if you have `vercel` installed locally):**
 ```bash
 vercel env add STRIPE_SECRET_KEY production
 # paste sk_test_...
@@ -178,13 +189,19 @@ vercel env add NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY production
 # paste pk_test_...
 ```
 
+Either way, the values you're adding are:
+- `STRIPE_SECRET_KEY` = `sk_test_...` (from prereq §1)
+- `NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY` = `pk_test_...`
+
+Leave `STRIPE_WEBHOOK_SECRET` for Step 9 — the value doesn't exist yet.
+
 > **Why Production scope (with sandbox `sk_test_*` keys)?** Vercel scopes (`Production` / `Preview` / `Development`) are about *which deploys* get the env var, not about which Stripe mode the keys belong to. The key value itself (`sk_test_*` vs `sk_live_*`) is what decides sandbox vs live. So putting `sk_test_*` in Production scope means "my main-branch deploy uses Stripe sandbox" — which is exactly what M2 wants. Live keys never enter this course (see prereq §1).
 
 > **Why no `.env.local`?** This skill avoids local-shell setup entirely. The student never runs `npm run dev` or `stripe listen`; all tests happen against the deployed Vercel production URL. If you personally want a local dev loop later, you can add `.env.local` outside this skill — but the course path skips it.
 
 #### 2b — Add the Stripe SDK to the repo
 
-In Claude Code, add `stripe` to `package.json` (no shell required — Claude edits `package.json` directly and Vercel runs `npm install` during the next deploy):
+In Claude Code, add `stripe` to `package.json` (no shell required — Claude edits `package.json` directly and Vercel runs the install during the next deploy):
 
 ```json
 {
@@ -196,9 +213,19 @@ In Claude Code, add `stripe` to `package.json` (no shell required — Claude edi
 
 (If you prefer the exact version `^22.0.2` that the production app uses, pin to that — but `^22.x` is fine; the apiVersion is what matters.)
 
+> **If your repo uses `bun` (M0 default):** the sandbox / Vercel build environment may not have `bun` installed by default, and `bun install --frozen-lockfile` will fail because `bun.lock` doesn't yet contain the `stripe` entry. Add this to `vercel.json` (create the file if it doesn't exist):
+>
+> ```json
+> {
+>   "installCommand": "bun install --no-frozen-lockfile"
+> }
+> ```
+>
+> This tells Vercel to install with bun and allow the lockfile to update during install. (Alternative: run `bun install` locally, commit the updated `bun.lock`, then keep Vercel's default — but the `vercel.json` override is more student-proof.) `npm`/`pnpm` projects need no change.
+
 #### 2c — Create the shared Stripe client
 
-File: `lib/stripe.ts`.
+File: **`src/lib/stripe.ts`** (or `lib/stripe.ts` if your `tsconfig` doesn't use a `src/` root — see [Project conventions](#project-conventions-to-match-canonical-for-this-course)).
 
 ```ts
 import Stripe from 'stripe'
@@ -214,7 +241,7 @@ export const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
 
 > **Why pin the apiVersion?** Stripe rolls API versions and breaking changes ship behind that pin. Two months from now your `package.json` will float a newer SDK, and without a pinned version you'd get a surprise breaking change. Pin and forget.
 
-Commit, but **do not push yet** — we want one push *after* Step 3 creates the Stripe prices and Steps 4–8 write the rest of the schema/UI/worker code, so the production deploy comes up with everything in place. The first push lands in Step 9.
+You can commit local progress as you go through Steps 2–8, but **don't push yet** — the first push lands in Step 9a once the schema, UI, API routes, and worker change are all in place, so Vercel's first M2 deploy boots with the full surface ready. If you prefer per-step commits to one giant commit, that's fine — just keep them all local until §9a.
 
 ### Step 3 — Create the three credit-tier prices in Stripe sandbox
 
@@ -302,6 +329,22 @@ This is one file under `supabase/migrations/`. The exact filename pattern is `YY
 **Required content** (paraphrase for the student, then write the file):
 
 ```sql
+-- 0. profiles table (idempotent — M0 ships Lovable-only; M1 may or may not have
+-- created profiles; M2 needs it regardless). Safe to run even if M1 already made it.
+CREATE TABLE IF NOT EXISTS public.profiles (
+  id uuid PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
+  role text NOT NULL DEFAULT 'user',
+  email text,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
+ALTER TABLE public.profiles ENABLE ROW LEVEL SECURITY;
+
+DO $$ BEGIN
+  CREATE POLICY "Users can view own profile" ON public.profiles
+    FOR SELECT USING (id = auth.uid());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
 -- 1. credits_balance on profiles
 ALTER TABLE public.profiles
   ADD COLUMN IF NOT EXISTS credits_balance numeric NOT NULL DEFAULT 30;
@@ -378,8 +421,15 @@ CREATE TRIGGER on_auth_user_created
   FOR EACH ROW EXECUTE FUNCTION public.handle_new_user();
 
 -- 5. New job status: insufficient_credits
--- M1 created jobs.status as a free-text column with no CHECK constraint, so no
--- ALTER is needed here. If the student added a constraint in M1, extend it now.
+-- If M1 created jobs.status as a free-text column with no CHECK constraint, this
+-- block is a no-op. If M1 (or a Lovable-generated migration) added a CHECK
+-- constraint, we must drop + re-add it to allow the new 'insufficient_credits'
+-- value. Doing both unconditionally is safe and idempotent.
+ALTER TABLE public.jobs DROP CONSTRAINT IF EXISTS jobs_status_check;
+ALTER TABLE public.jobs ADD CONSTRAINT jobs_status_check
+  CHECK (status IN ('pending', 'downloading', 'transcribing', 'done', 'error', 'insufficient_credits'));
+-- ⚠ If your M1 used a different set of status values, list them ALL here, plus
+-- 'insufficient_credits'. Check first: SELECT DISTINCT status FROM public.jobs;
 
 -- 6. Backfill signup_bonus for users created before this migration
 INSERT INTO public.credit_transactions (user_id, amount, type, description)
@@ -405,11 +455,11 @@ SELECT count(*) FROM credit_transactions WHERE type = 'signup_bonus';
 
 ### Step 5 — Build the `/credits` page
 
-File: `app/credits/page.tsx`. Read in the server component:
+File: **`src/app/credits/page.tsx`** (path-alias-resolved as `@/app/credits/page.tsx`). Read in the server component:
 
 ```ts
 // Server component pattern
-import { createServerClient } from '@/lib/supabase/server'
+import { createServerClient } from '@/lib/supabase/server'   // your M1 helper
 
 export default async function CreditsPage() {
   const supabase = await createServerClient()
@@ -477,7 +527,7 @@ Track `purchasingId` in `useState` so the user can't double-click and open two c
 
 ### Step 6 — Build the API routes
 
-#### 5a — `POST /api/credits/checkout`
+#### 6a — `POST /api/credits/checkout`
 
 File: `app/api/credits/checkout/route.ts`.
 
@@ -492,7 +542,7 @@ Responsibilities:
 
 **Important:** `credits` must be passed as a string in `metadata` (Stripe metadata values are all strings — passing a number works but Stripe coerces to string anyway; explicit `String()` is the honest pattern).
 
-#### 5b — `POST /api/stripe/webhook`
+#### 6b — `POST /api/stripe/webhook`
 
 File: `app/api/stripe/webhook/route.ts`. This is the most fragile route in M2 — read each rule before writing:
 
@@ -570,16 +620,18 @@ export async function POST(req: NextRequest) {
 
 > **Five things that bite every student in this route:**
 > 1. **`request.text()` not `request.json()`.** Stripe's signature is computed over the exact byte stream. JSON-parsing first mutates whitespace → signature fails verification with a confusing 400.
-> 2. **Service-role client, not the cookie-bound one.** Stripe is the caller, not the user — there's no auth cookie. The user-bound client will fail RLS on the `profiles` update. If you don't already have a `createServiceClient()` helper from M1, create one now reading `SUPABASE_SERVICE_ROLE_KEY`.
+> 2. **Service-role client, not the cookie-bound one.** Stripe is the caller, not the user — there's no auth cookie. The user-bound client will fail RLS on the `profiles` update. If you don't already have a `createServiceClient()` helper from M1, create one now reading **`SUPABASE_SECRET_KEY`** (this course's canonical name — if your M1 used `SUPABASE_SERVICE_ROLE_KEY`, use that name instead; same value either way).
 > 3. **Read the unique-violation as success.** `23505` means "we already processed this payment_intent" — that's idempotency working, return 200 so Stripe stops retrying. Any other error: return 500 so Stripe retries.
 > 4. **Two writes, not one transaction.** The insert lands first (the ledger is the source of truth); the balance update is derived. If the second write fails, you have a "missing credit" anomaly that's manually fixable by `UPDATE profiles SET credits_balance = (SELECT SUM(amount) FROM credit_transactions WHERE user_id = ...)`. Either accept this risk or rewrite as a Postgres function called via `rpc()`.
 > 5. **No 200 before signature verification.** Stripe interprets non-200 as "retry"; that's what you want for transient errors. But returning 200 before verifying means a bad-signed request gets falsely acknowledged. Order matters.
 
-#### 5c — Middleware exemption — CRITICAL
+#### 6c — Middleware exemption — CRITICAL
 
-Without this step, Stripe webhooks redirect to `/login` (307) and silently fail. Symptom: Stripe dashboard shows the event fired, payment "succeeded", balance never moves, no `POST /api/stripe/webhook` in Vercel logs.
+Without this step, Stripe webhooks may hit `auth.getUser()` and either redirect to `/login` (307) or fail signature verification (because middleware mutates the request). Symptom: Stripe dashboard shows the event fired, payment "succeeded", balance never moves, and there's either no `POST /api/stripe/webhook` line in Vercel logs (307) or a `400 invalid signature` line (auth refresh mangled the body).
 
-Add to `middleware.ts`:
+**Find your middleware shape first** — there are two common patterns in this course's M1:
+
+**Pattern A — `isPublic` redirect helper (the older M1 template).** Add `/api/stripe/webhook` to the public list:
 
 ```ts
 const isPublic =
@@ -589,50 +641,120 @@ const isPublic =
   request.nextUrl.pathname.startsWith('/api/stripe/webhook')   // NEW
 ```
 
-> Every future public webhook (GitHub, Slack, anything Stripe pushes that's NOT `/api/stripe/webhook`) needs the same exemption. The `auth.getUser()` middleware redirect is correct for everything except machine-to-machine callbacks.
+**Pattern B — session-refresh-only with a `config.matcher` (Next.js 16 default; what most current M1 projects look like).** The middleware doesn't redirect — it just runs `supabase.auth.getUser()` on every matched request to refresh the cookie. Add `/api/stripe/webhook` to the matcher's exclusion regex so the middleware doesn't run for it at all:
+
+```ts
+export const config = {
+  matcher: [
+    // Skip Next internals, static files, AND stripe webhook
+    '/((?!_next/static|_next/image|favicon.ico|api/stripe/webhook|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)',
+  ],
+}
+```
+
+(If your matcher is a different shape, the principle is the same: ensure `/api/stripe/webhook` is excluded.)
+
+> Every future public webhook (GitHub, Slack, anything Stripe pushes that's NOT `/api/stripe/webhook`) needs the same exemption. The `auth.getUser()` middleware behavior is correct for everything except machine-to-machine callbacks.
 
 ### Step 7 — Worker change: duration check + deduct on `done`
 
-This is the M2 worker patch. **One commit, two changes to `worker/worker.py`** (or the equivalent file from M1).
+This is the M2 worker patch. **One commit, three changes to `worker/worker.py`** (or the equivalent file from M1): (a) claim the job FIRST (flip status to `downloading`), (b) probe duration cheaply with a fallback, (c) deduct credits on `done`.
 
-#### 6a — After `yt-dlp` resolves duration, BEFORE Whisper
+#### 7a — Claim the job BEFORE any external work
 
-Use yt-dlp's `--print duration` (no download) first to get seconds; round up to minutes; compare to balance.
+**Order matters.** Past students have crashed the worker on the duration probe (some video URLs return `NA` from `yt-dlp --print duration`, see 7b), which left the job stuck in `pending`. The distributor then re-spawned the same worker, which crashed again — infinite respawn loop, real Whisper-side cost zero but distributor-side cost real.
+
+Fix: the **first DB write of every job iteration** is the status flip from `pending` → `downloading`. That claims the job; if anything below it crashes, the job is in `downloading` and won't be re-spawned by the distributor's pending-job poll. (Stuck-`downloading` recovery is a separate, slower path with a 1-hour timeout, which is the correct cadence for unattended crashes.)
+
+```python
+# At the top of the per-job loop body, BEFORE the duration probe / balance read:
+supabase.table("jobs").update({"status": "downloading"}).eq("id", job["id"]).execute()
+```
+
+#### 7b — Probe duration cheaply, with a fallback for `NA`
+
+`yt-dlp --print duration` returns the literal string `NA` for some sources (e.g. direct CloudFront `.mp4` URLs with no manifest). Doing `float("NA")` raises `ValueError` and crashes the worker — the #1 production bug past students have hit. Treat `NA` as "I don't know yet" and fall back to `ffprobe` after the video has been downloaded.
 
 ```python
 import math, subprocess
+from typing import Optional
 
-def get_duration_minutes(video_url: str) -> int:
-    """Probe video duration without downloading. Returns ceil(seconds/60)."""
-    out = subprocess.check_output(
-        ["yt-dlp", "--print", "duration", "--no-warnings", video_url],
-        text=True,
-    ).strip()
-    seconds = float(out)
+def probe_duration_minutes_cheap(video_url: str) -> Optional[int]:
+    """Probe duration WITHOUT downloading. Returns ceil(seconds/60), or None if
+    the source doesn't expose duration in its manifest (CloudFront direct mp4s,
+    some Internet Archive items, etc.). On None, fall back to ffprobe post-download."""
+    try:
+        out = subprocess.check_output(
+            ["yt-dlp", "--print", "duration", "--no-warnings", video_url],
+            text=True, timeout=30,
+        ).strip()
+    except subprocess.SubprocessError:
+        return None
+    if not out or out.upper() == "NA":
+        return None
+    try:
+        seconds = float(out)
+    except ValueError:
+        return None
     return max(1, math.ceil(seconds / 60))   # minimum 1 credit even for <60s clips
 
-# In the job loop, immediately after claiming the job:
-minutes = get_duration_minutes(job["video_source_url"])
-balance = supabase.table("profiles").select("credits_balance").eq("id", job["user_id"]).single().execute().data["credits_balance"]
+def probe_duration_minutes_from_file(local_path: str) -> int:
+    """After download, ffprobe always works. Use as fallback when 7a returned None."""
+    out = subprocess.check_output(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+         "-of", "default=noprint_wrappers=1:nokey=1", local_path],
+        text=True,
+    ).strip()
+    return max(1, math.ceil(float(out) / 60))
 
-if minutes > balance:
+# In the job loop, AFTER the status flip in 7a, BEFORE Whisper:
+balance = float(
+    supabase.table("profiles")
+    .select("credits_balance").eq("id", job["user_id"]).single()
+    .execute().data["credits_balance"]
+)
+
+minutes = probe_duration_minutes_cheap(job["video_source_url"])
+
+if minutes is not None and minutes > balance:
+    # Cheap path: we know the duration without downloading. Block here.
     supabase.table("jobs").update({"status": "insufficient_credits"}).eq("id", job["id"]).execute()
-    # Optional: write a zero-amount ledger row so the user sees WHY in their history
     supabase.table("credit_transactions").insert({
         "user_id": job["user_id"],
         "amount": 0,
         "type": "deduction",
-        "description": f"Insufficient credits: video is {minutes} min, you have {balance}",
+        "description": f"Insufficient credits: video is {minutes} min, you have {int(balance)}",
         "job_id": job["id"],
     }).execute()
-    return   # skip Whisper entirely
+    return   # skip Whisper, skip download
+
+# Either minutes is known and balance is sufficient, OR minutes is None (probe
+# couldn't read it without downloading). In both cases, proceed to download —
+# then we'll have the file and can ffprobe for the precise duration.
+
+local_path = download_video(job["video_source_url"])   # your existing M1 download step
+
+if minutes is None:
+    minutes = probe_duration_minutes_from_file(local_path)
+    if minutes > balance:
+        supabase.table("jobs").update({"status": "insufficient_credits"}).eq("id", job["id"]).execute()
+        supabase.table("credit_transactions").insert({
+            "user_id": job["user_id"],
+            "amount": 0,
+            "type": "deduction",
+            "description": f"Insufficient credits: video is {minutes} min, you have {int(balance)}",
+            "job_id": job["id"],
+        }).execute()
+        return
 ```
 
 > **Why probe duration on the worker, not at submit?** `/api/jobs` runs on Vercel — invoking yt-dlp there means bundling a ~50 MB binary into a serverless function, plus dealing with cold-start latency. The worker already has yt-dlp installed (M1 prereq §2.6) and is the natural place to do anything that depends on the actual video URL.
 
 > **Why `math.ceil`?** A 61-second clip is still 2 credits — never round down or users can game by submitting just-under-60s clips repeatedly. This is the one place the "no anti-gaming for v1" carve-out doesn't apply, because it's cheaper to write `ceil` than to argue about it.
 
-#### 6b — On successful Whisper completion, deduct credits
+> **Why the two-stage probe (yt-dlp first, ffprobe fallback)?** YouTube / Vimeo / archive.org with manifests give yt-dlp the duration for free with zero bytes downloaded — that's a free `insufficient_credits` gate that costs us nothing. Direct mp4 URLs (CloudFront, S3, …) don't have manifests; yt-dlp returns `NA`. For those we accept the cost of one download to get a precise ffprobe duration. Slightly less efficient, but: (a) we still don't call Whisper on insufficient credits, which is where the real money is, and (b) treating `NA` as a crash — as the original skill did — is a worse trade.
+
+#### 7c — On successful Whisper completion, deduct credits
 
 After `subtitle_txt_content` is written and `jobs.status` is about to become `done`, deduct:
 
@@ -648,7 +770,7 @@ supabase.table("credit_transactions").insert({
 
 # Re-read balance and write back (not RPC — keep M2 simple, accept TOCTOU race)
 profile = supabase.table("profiles").select("credits_balance").eq("id", job["user_id"]).single().execute().data
-new_balance = max(0, Number(profile["credits_balance"]) - minutes)
+new_balance = max(0.0, float(profile["credits_balance"]) - minutes)
 supabase.table("profiles").update({"credits_balance": new_balance}).eq("id", job["user_id"]).execute()
 
 supabase.table("jobs").update({"status": "done"}).eq("id", job["id"]).execute()
@@ -656,30 +778,13 @@ supabase.table("jobs").update({"status": "done"}).eq("id", job["id"]).execute()
 
 > **Known race:** if the same user has two workers running simultaneously (only possible if you ran the M1 distributor with concurrency > 1, which the M1 skill doesn't), two `SELECT current; UPDATE current - N` flows can clobber each other. For v1 this is acceptable — the M1 distributor spawns one worker per job sequentially. Don't pull a Postgres `UPDATE ... SET credits_balance = credits_balance - $N RETURNING credits_balance` rewrite into M2; keep the simple read-then-write.
 
-#### 6c — Deploy the worker change
+#### 7d — Don't deploy yet
 
-Two `call_aws ssm send-command` calls (same JSON-form pattern as M1):
-
-```
-call_aws ssm send-command --instance-ids "$INSTANCE_ID" --document-name AWS-RunShellScript \
-  --parameters '{"commands":["sudo -u ubuntu bash -c \"cd /home/ubuntu/app && git pull\""]}'
-
-call_aws ssm send-command --instance-ids "$INSTANCE_ID" --document-name AWS-RunShellScript \
-  --parameters '{"commands":["sudo systemctl restart m1-distributor.service"]}'
-```
-
-Verify with the log tail:
-
-```
-call_aws ssm send-command --instance-ids "$INSTANCE_ID" --document-name AWS-RunShellScript \
-  --parameters '{"commands":["sudo tail -30 /var/log/m1-distributor.log"]}'
-```
-
-Look for the next poll cycle to start — proves the new code is loaded.
+The worker code is now correct on disk but **the EC2 doesn't have it yet** — `git push` happens in Step 9a, and the EC2's `git pull` runs in Step 10a. This is intentional: we want one push that contains everything (schema, UI, routes, worker) so the production cutover is atomic. Don't try to SSM-pull mid-build; the EC2 would pull old code that's missing the matching schema. Move on to Step 8.
 
 ### Step 8 — `/api/jobs` pre-check + header balance badge
 
-#### 7a — Patch `app/api/jobs/route.ts`
+#### 8a — Patch `app/api/jobs/route.ts`
 
 Right before the INSERT into `jobs`, add the floor-1-credit check:
 
@@ -704,9 +809,15 @@ This is the **fast pre-check at submit** — it cheaply blocks the obvious "no c
 
 Update the client-side error UX in `app/upload/page.tsx`: if the POST returns 402, show "You don't have enough credits — [Buy credits](/credits)".
 
-#### 7b — Header balance badge
+#### 8b — Header balance badge
 
-Wherever the M1 header lives (probably `app/layout.tsx` or a `<NavBar />` component), add a server-rendered balance pill that reads `profiles.credits_balance` for the signed-in user and renders as:
+The M1 header may be one of:
+
+- a shared `<AppHeader />` / `<NavBar />` component used by `layout.tsx` — patch it in place;
+- a header block in `app/layout.tsx` directly — patch it in place;
+- **per-page inline headers** in each page file (Lovable's default output, and what M0/M1 often leaves behind) — create a new shared `src/components/AppHeader.tsx` now and migrate each page to import + render it. This is a small refactor (4–5 pages typically), well worth doing once.
+
+The shared header reads `profiles.credits_balance` for the signed-in user and renders a balance pill:
 
 ```
 Credits: 30 [Buy more]
@@ -720,13 +831,15 @@ No localhost, no `stripe listen`, no `npm run dev`, no `.env.local`. We push eve
 
 #### 9a — Commit + push to main (triggers production deploy)
 
-Same `git push origin main` flow as M1. Confirm `git status` shows the M2 file set (full list in the "Files created or changed" section at the bottom of this skill). Then:
+Same `git push origin main` flow as M1. Confirm `git status` shows the M2 file set (full list in the "Files created or changed" section at the bottom of this skill). Either one big commit or several per-step commits is fine — what matters is that everything Steps 2–8 created is pushed together so production gets a coherent deploy.
 
 ```bash
 git add -A
 git commit -m "m2: stripe credits system (Steps 2–8)"
 git push origin main
 ```
+
+(If you already committed per-step in Steps 2–8, just `git push origin main` now.)
 
 In Cowork the same effect can be driven via Claude with the GitHub MCP — same shape, no shell required.
 
@@ -735,34 +848,30 @@ Wait for the production deploy to go ready. In Cowork: ask Claude to list deploy
 Confirm your production Vercel URL is what you expect (looks like `https://<project>.vercel.app` or whatever your M0/M1 deploy ended up at). Open `<prod-vercel-url>/credits` signed in. The 3 tier cards from Step 5 should render and the balance badge from Step 8 should show `30` (or whatever the signup-bonus state is). If `/credits` 500s, look at Vercel runtime logs (`mcp__vercel__*` log tool or `vercel logs <prod-vercel-url>`) — most likely causes:
 
 - Migration in Step 4 didn't apply to the remote Supabase — re-run `mcp__supabase_remote__apply_migration`.
-- `STRIPE_SECRET_KEY` is missing from Vercel **Production** env (Step 2a) — add it, then trigger a redeploy with an empty commit.
-- The Stripe SDK isn't installed — Step 2b added it to `package.json` but Vercel's build needs to see that file. Confirm `package.json` has `stripe` under `dependencies` and the diff was actually committed.
+- `STRIPE_SECRET_KEY` is missing from Vercel **Production** env (Step 2a) — add it via the dashboard, then trigger a redeploy with an empty commit.
+- The Stripe SDK isn't installed — Step 2b added it to `package.json` but Vercel's build needs to see that file. Confirm `package.json` has `stripe` under `dependencies` and the diff was actually committed. For bun projects, also confirm `vercel.json` has the `installCommand` override from Step 2b — without it, `bun install --frozen-lockfile` will fail because `bun.lock` hasn't been updated to include `stripe`.
 
 #### 9b — Create the Stripe dashboard webhook endpoint
 
 This is the durable, non-rotating webhook secret — unlike `stripe listen`, which we're not using.
 
-**Cowork (Stripe MCP):** ask Claude verbatim:
+> **⚠ Stripe MCP cannot manage webhook endpoints (as of 2026-05).** It exposes Products / Prices / Customers / Payment Intents / etc., but NOT webhook endpoints. So **the dashboard is the primary path in both Cowork and CLI modes.** If a future Stripe MCP version exposes `create_webhook_endpoint`, prefer that.
 
-> 「幫我在 Stripe sandbox dashboard 建一個 webhook endpoint：
-> - URL: `<貼上 §9a 拿到的 Vercel production URL>/api/stripe/webhook`
-> - 訂閱事件: 只訂 `checkout.session.completed`（refund 是 v2 功能）
-> - 把建好之後的 endpoint 的 signing secret（`whsec_...`）給我，我要丟進 Vercel Production env。」
+**Primary path — Stripe dashboard:**
 
-Claude calls the Stripe MCP's `create_webhook_endpoint` tool (or equivalent) and reports back something like:
-
-```
-Created webhook endpoint we_1XYZ... at https://<prod-vercel>/api/stripe/webhook
-Signing secret: whsec_abcDef123...
-Subscribed events: ['checkout.session.completed']
-```
-
-**CLI fallback (Stripe dashboard):**
-
-1. https://dashboard.stripe.com/test/webhooks → **Add endpoint**.
+1. https://dashboard.stripe.com/test/webhooks → **Add endpoint**. (Confirm the top-right account selector still shows your sandbox, not "Live account".)
 2. **Endpoint URL:** the `<prod-vercel-url>/api/stripe/webhook` you confirmed in §9a.
 3. **Events to send:** `checkout.session.completed` (only — `charge.refunded` is a v2 feature; add it when you start handling refunds).
-4. **Add endpoint** → on the resulting endpoint page, click **Reveal** under "Signing secret". Copy the `whsec_...`.
+4. **Add endpoint** → on the resulting endpoint page, click **Reveal** under "Signing secret". Copy the `whsec_...`. That value goes into Vercel Production env in §9c.
+
+**CLI alternative (if you have `stripe` installed and authenticated against sandbox):**
+
+```bash
+stripe webhook_endpoints create \
+  --url "<prod-vercel-url>/api/stripe/webhook" \
+  --enabled-events checkout.session.completed
+# Capture the `secret` field from the response — that's your whsec_...
+```
 
 > **Stable, not rotating.** The dashboard-endpoint signing secret is bound to the endpoint URL and survives until you delete the endpoint. Unlike `stripe listen`'s ephemeral CLI secret (which rotates every restart and caused the "payment succeeded, balance didn't update" bug class for past students), this one you set once.
 
@@ -770,21 +879,24 @@ Subscribed events: ['checkout.session.completed']
 
 #### 9c — Add the secret to Vercel Production env
 
-**Cowork:** ask Claude:
+Same MCP gap as §2a — **Vercel MCP cannot manage env vars**, so the dashboard is the primary path.
 
-> 「把 `STRIPE_WEBHOOK_SECRET` = `whsec_abcDef123...` 加到 Vercel project 的 **Production** scope，然後 redeploy 一次最新的 production deployment 讓新 env 生效。」
+**Primary path — Vercel dashboard:** Project → Settings → Environment Variables → Production scope → add `STRIPE_WEBHOOK_SECRET` = `whsec_...` (from §9b).
 
-**CLI:**
+**CLI alternative:**
 ```bash
 vercel env add STRIPE_WEBHOOK_SECRET production
-# paste whsec_abcDef123...
+# paste whsec_...
+```
 
-# trigger a redeploy so the new env applies to the live production URL
+**Then redeploy** so the new env applies (Vercel reads env at build/start, not per-request). Use an empty commit + push:
+
+```bash
 git commit --allow-empty -m "trigger redeploy with webhook secret"
 git push origin main
 ```
 
-Wait for the new production deploy to go ready (`mcp__vercel__*` deployment-list tool or `vercel ls`).
+Wait for the new production deploy to go ready (Vercel MCP's deployment-list tool, or `vercel ls`, or the dashboard's Deployments tab — any of these works).
 
 > **Why redeploy after adding env?** Vercel reads env at build/start time, not on every request. An env var added after a deploy doesn't apply until you redeploy. An empty `git commit --allow-empty` is the cheapest way to trigger one.
 
@@ -858,24 +970,36 @@ Step 9 already gave you a working purchase flow on production (real Stripe Check
 
 #### 10a — SSM-pull the worker change onto EC2
 
-Two `call_aws ssm send-command` calls (same pattern as Step 7c — repeated here so Step 10 stands on its own):
+Three `call_aws ssm send-command` calls. **Use the shorthand `commands=[...]` form**, not the JSON `--parameters '{"commands":[...]}'` form — the `call_aws` MCP's argv parser strips JSON quoting, so nested-quote and `&&` patterns fail. Keep each command simple (no `&&`, no nested quotes) and run them as separate calls.
 
 ```
-call_aws ssm send-command --instance-ids "$INSTANCE_ID" --document-name AWS-RunShellScript \
-  --parameters '{"commands":["sudo -u ubuntu bash -c \"cd /home/ubuntu/app && git pull\""]}'
+call_aws ssm send-command \
+  --instance-ids "$INSTANCE_ID" \
+  --document-name AWS-RunShellScript \
+  --parameters commands=["cd /home/ubuntu/app && sudo -u ubuntu git pull"]
+```
 
-call_aws ssm send-command --instance-ids "$INSTANCE_ID" --document-name AWS-RunShellScript \
-  --parameters '{"commands":["sudo systemctl restart m1-distributor.service"]}'
+Wait for that to complete (or check `aws ssm list-command-invocations`), then:
+
+```
+call_aws ssm send-command \
+  --instance-ids "$INSTANCE_ID" \
+  --document-name AWS-RunShellScript \
+  --parameters commands=["sudo systemctl restart m1-distributor.service"]
 ```
 
 Then read the log tail to confirm the new code is loaded:
 
 ```
-call_aws ssm send-command --instance-ids "$INSTANCE_ID" --document-name AWS-RunShellScript \
-  --parameters '{"commands":["sudo tail -30 /var/log/m1-distributor.log"]}'
+call_aws ssm send-command \
+  --instance-ids "$INSTANCE_ID" \
+  --document-name AWS-RunShellScript \
+  --parameters commands=["sudo tail -30 /var/log/m1-distributor.log"]
 ```
 
 Expect a fresh poll loop with the new "duration probe" / "credit check" log lines you added in Step 7.
+
+> **CLI-direct alternative:** if you're running `aws-cli` locally (not through the `call_aws` MCP), the JSON form `--parameters '{"commands":["..."]}'` works and is what [[aws-best-practice]] recommends. The shorthand here is specifically for the MCP wrapper.
 
 #### 10b — End-to-end transcribe smoke test
 
@@ -901,21 +1025,26 @@ Then exit this skill — the checklist takes over.
 
 ## Files created or changed by this work
 
-- `package.json`, `package-lock.json` — added `stripe`
-- `lib/stripe.ts` — new shared Stripe client
-- `lib/supabase/service.ts` — service-role client helper (if not already from M1)
-- `app/credits/page.tsx` — new (balance + tier cards + transaction history)
-- `app/credits/success/page.tsx` — new (UX-only post-purchase landing)
-- `app/api/credits/checkout/route.ts` — new (Checkout Session creator)
-- `app/api/stripe/webhook/route.ts` — new (signature verify + idempotent credit)
-- `app/api/jobs/route.ts` — patched (pre-check rejects 0-balance submits with 402)
-- `app/upload/page.tsx` — patched (402 error UX with link to `/credits`)
-- `app/layout.tsx` (or `<NavBar />`) — patched (header balance badge)
-- `middleware.ts` — patched (`/api/stripe/webhook` added to `isPublic`)
-- `worker/worker.py` — patched (duration probe + `insufficient_credits` short-circuit + deduct on `done`)
-- `supabase/migrations/<timestamp>_m2_credits_system.sql` — new (everything in Step 4)
-- Vercel env (Production scope) — `STRIPE_SECRET_KEY` (`sk_test_*`, Step 2a), `NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY` (`pk_test_*`, Step 2a), `STRIPE_WEBHOOK_SECRET` (`whsec_*` from §9b's endpoint, added in §9c)
-- One Stripe dashboard webhook endpoint — points at `<prod-vercel-url>/api/stripe/webhook`, subscribed to `checkout.session.completed` (Step 9b)
+Paths below assume the canonical `@/*` → `./src/*` setup. If your project's path alias maps to root (`./`), drop the `src/` prefix.
+
+- `package.json`, `bun.lock` / `package-lock.json` — added `stripe`
+- `vercel.json` — added (if bun project; sets `installCommand` to `bun install --no-frozen-lockfile`)
+- `src/lib/stripe.ts` — new shared Stripe client
+- `src/lib/supabase/service.ts` — service-role client helper (reads `SUPABASE_SECRET_KEY` — or your project's equivalent name)
+- `src/app/credits/page.tsx` — new (balance + tier cards + transaction history)
+- `src/app/credits/success/page.tsx` — new (UX-only post-purchase landing)
+- `src/components/buy-button.tsx` — new client component (POSTs to `/api/credits/checkout`); optional, can live inline in the page
+- `src/components/AppHeader.tsx` — new shared header (if M1 used per-page inline headers); patches to existing header otherwise
+- `src/app/api/credits/checkout/route.ts` — new (Checkout Session creator)
+- `src/app/api/stripe/webhook/route.ts` — new (signature verify + idempotent credit)
+- `src/app/api/jobs/route.ts` — patched (pre-check rejects 0-balance submits with 402)
+- `src/app/upload/page.tsx` — patched (402 error UX with link to `/credits`)
+- `src/app/layout.tsx` (or per-page headers) — patched to render `<AppHeader />`
+- `src/middleware.ts` — patched (`/api/stripe/webhook` excluded; pattern depends on whether your M1 uses `isPublic` or `config.matcher`)
+- `worker/worker.py` — patched (status-flip first, duration probe with NA-fallback, `insufficient_credits` short-circuit, deduct on `done`)
+- `supabase/migrations/<timestamp>_m2_credits_system.sql` — new (everything in Step 4, including the `profiles` CREATE-IF-NOT-EXISTS guard and the `jobs.status` CHECK constraint refresh)
+- Vercel env (Production scope) — `STRIPE_SECRET_KEY` (`sk_test_*`, Step 2a), `NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY` (`pk_test_*`, Step 2a), `STRIPE_WEBHOOK_SECRET` (`whsec_*` from §9b's endpoint, added in §9c). Added via Vercel **dashboard** because Vercel MCP doesn't expose env management.
+- One Stripe dashboard webhook endpoint — points at `<prod-vercel-url>/api/stripe/webhook`, subscribed to `checkout.session.completed` (Step 9b). Created via Stripe **dashboard** because Stripe MCP doesn't expose webhook endpoint management.
 
 ## Debugging cheatsheet
 
