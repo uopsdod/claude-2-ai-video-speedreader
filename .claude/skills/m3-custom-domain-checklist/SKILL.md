@@ -1,6 +1,6 @@
 ---
 name: m3-custom-domain-checklist
-description: Course 2 Milestone 3 verification — checks every artifact (Route 53 domain registration, hosted zone, CNAME for the `ai-video-speed-reader` subdomain, Vercel domain attachment, HTTPS/TLS, Supabase auth redirect URLs) is real and correctly wired. Use when the student says "驗收 M3", "check M3", "M3 done?", or after the `m3-custom-domain` skill completes Step 4.
+description: Course 2 Milestone 3 verification — checks every artifact (Route 53 domain registration, hosted zone, CNAME for the `ai-video-speed-reader` subdomain, optional `_vercel` TXT ownership record, live-HTTPS reachability of the subdomain, `.vercel.app` URL still serving + Stripe webhook intact, Supabase auth redirect URLs) is real and correctly wired. The authoritative attachment check is a live HTTPS fetch — `mcp__vercel__get_project` does NOT list custom domains, so this checklist deliberately doesn't gate on it. Use when the student says "驗收 M3", "check M3", "M3 done?", or after the `m3-custom-domain` skill completes Step 4.
 ---
 
 # M3 — Custom Domain Checklist
@@ -22,7 +22,7 @@ Verifies the student has actually completed M3 — not just *thinks* they have. 
 | Section | CLI mode tool | Cowork mode equivalent |
 |---|---|---|
 | A — Route 53 DNS | `aws route53 ...` / `dig` / `nslookup` | `call_aws route53 ...` |
-| B — Vercel domain + HTTPS | `curl -sI https://<subdomain>` / Vercel dashboard | `mcp__vercel__*` + browser |
+| B — Vercel domain + HTTPS | `curl -sI https://<subdomain>` / Vercel dashboard | `WebFetch` + Vercel dashboard (browser). **Not** `mcp__vercel__get_project` — it doesn't list custom domains. |
 | C — Supabase auth | `mcp__supabase_remote__execute_sql` + browser | same |
 | D — M2 regression | `mcp__supabase_remote__execute_sql` + browser | same |
 
@@ -61,7 +61,7 @@ Must return a hosted zone. Save the zone ID for Section A checks.
 
 ## Checklist
 
-### Section A — Route 53 domain + DNS (5 checks)
+### Section A — Route 53 domain + DNS (6 checks)
 
 | # | Check | How to verify |
 |---|---|---|
@@ -69,7 +69,8 @@ Must return a hosted zone. Save the zone ID for Section A checks.
 | A2 | Auto-renew is enabled | Same `get-domain-detail` response: `AutoRenew` must be `true`. If false, the domain expires after 1 year without warning — set via `call_aws route53domains enable-domain-auto-renew --domain-name <apex>`. |
 | A3 | WHOIS privacy protection is enabled | Same `get-domain-detail` response: `AdminPrivacy`, `RegistrantPrivacy`, `TechPrivacy` must all be `true`. |
 | A4 | Hosted zone exists with correct NS delegation | `call_aws route53 list-resource-record-sets --hosted-zone-id <zone-id> --query "ResourceRecordSets[?Type=='NS']"` — must return 4 NS records. Cross-check: `call_aws route53domains get-domain-detail --domain-name <apex> --query 'Nameservers'` — the NS servers from the registrar must match the hosted zone's NS records. If they don't match, the hosted zone is orphaned (domain points to different name servers). |
-| A5 | CNAME for the product subdomain points to Vercel | `call_aws route53 list-resource-record-sets --hosted-zone-id <zone-id> --query "ResourceRecordSets[?Type=='CNAME' && Name=='ai-video-speed-reader.<apex>.']"` — must return one record with `Value` = `cname.vercel-dns.com` (or `cname.vercel-dns.com.` with trailing dot). |
+| A5 | CNAME for the product subdomain points to Vercel | `call_aws route53 list-resource-record-sets --hosted-zone-id <zone-id> --query "ResourceRecordSets[?Type=='CNAME' && Name=='ai-video-speed-reader.<apex>.']"` — must return one record with `Value` matching one of these patterns: a per-project target like `<hash>.vercel-dns-NNN.com.` (the current Vercel default; e.g. `2781f4ac0e405e15.vercel-dns-017.com.`) **or** the legacy generic `cname.vercel-dns.com.` Both are accepted; the only failure case is missing or pointing somewhere else entirely. |
+| A6 | `_vercel` TXT ownership record (if Vercel required one) | If the student hit the "linked to another Vercel account" flow in `m3-custom-domain` Step 1: `call_aws route53 list-resource-record-sets --hosted-zone-id <zone-id> --query "ResourceRecordSets[?Type=='TXT' && Name=='_vercel.<apex>.']"` — must return one record whose `Value` starts with `"vc-domain-verify=ai-video-speed-reader.<apex>,...` (note the embedded double-quotes — Route 53 stores TXT values with literal surrounding quotes). If the student did NOT hit that flow, this check is **N/A** (no record expected). |
 
 **Note:** No A record on the apex is expected — M3 deliberately leaves the apex unconfigured. If you find an apex A record, it's either left over from an earlier draft (clean it up) or the student deviated from the M3 plan.
 
@@ -81,26 +82,33 @@ If A4 NS mismatch: the hosted zone was created manually after registration, or t
 
 If A5 missing: the CNAME from `m3-custom-domain` Step 2 wasn't created. Re-run the `change-resource-record-sets` call.
 
+If A6 is missing **and** the student saw the "linked to another Vercel account" message in Step 1: the ownership TXT was never added (or was added without the inner double-quotes around the value). Fix per `m3-custom-domain` Step 2 Scenario B. Without this record, Vercel will never finish the domain verification and Section B will fail.
+
 ### Section B — Vercel domain + HTTPS (4 checks)
+
+> **Important — do NOT use `mcp__vercel__get_project.domains` as the gating check.** Verified during a real M3 run: that field only lists the auto-generated `*.vercel.app` aliases, never custom domains, even after the custom domain is fully verified and serving live HTTPS traffic. The **authoritative** check for "is the subdomain attached and serving?" is a live HTTPS fetch (B1 below) plus the Vercel dashboard status badge.
 
 | # | Check | How to verify |
 |---|---|---|
-| B1 | Product subdomain is attached to the Vercel project | `mcp__vercel__get_project` (using `projectId` + `teamId` from `mcp__vercel__list_projects`) — the returned project's `alias` / `domains` field must include `ai-video-speed-reader.<apex>`. Cross-check: `vercel domains ls` (CLI) or Vercel dashboard → Project → Settings → Domains, with ✅ status. If `get_project` returns the subdomain but `verification` field still has outstanding TXT challenges, DNS hasn't fully propagated — wait, then re-check. |
-| B2 | `https://ai-video-speed-reader.<apex>` returns HTTP 200 | `curl -sI https://ai-video-speed-reader.<apex> \| head -1` → `HTTP/2 200`. If Cowork, open the URL in a browser. |
-| B3 | TLS certificate is valid and covers the subdomain | `curl -vI https://ai-video-speed-reader.<apex> 2>&1 \| grep -i 'subject\|issuer\|expire'` — subject must include the subdomain, issuer should be Let's Encrypt (or similar), expiry should be in the future. In browser: click the 🔒 icon → Certificate → confirm the subdomain is listed. |
-| B4 | The old `.vercel.app` URL still works | `curl -sI https://<repo-name>.vercel.app \| head -1` → `HTTP/2 200`. The `.vercel.app` URL must continue to work — the Stripe webhook endpoint still points here. If it 404s or redirects to the subdomain, check Vercel's redirect rules. |
+| B1 | Live HTTPS fetch of the subdomain returns the app | `WebFetch url=https://ai-video-speed-reader.<apex> prompt="Return HTTP status and the first 200 characters of body HTML."` — must return HTTP 200 and body that looks like the M0/M2 landing page (e.g. contains "Video Speed Reader" or the project's product name). Or via `curl`: `curl -sI https://ai-video-speed-reader.<apex> \| head -1` → `HTTP/2 200`. Cross-check (advisory, not gating): Vercel dashboard → Project → Settings → Domains shows ✅ Valid Configuration for the subdomain. |
+| B2 | TLS certificate is valid and covers the subdomain | `curl -vI https://ai-video-speed-reader.<apex> 2>&1 \| grep -i 'subject\|issuer\|expire'` — subject must include the subdomain, issuer should be Let's Encrypt (or similar), expiry should be in the future. In browser: click the 🔒 icon → Certificate → confirm the subdomain is listed. |
+| B3 | The old `.vercel.app` URL still serves the app | `WebFetch url=https://<repo-name>.vercel.app prompt="Return HTTP status and first 200 chars."` — must return HTTP 200 (or via `curl -sI https://<repo-name>.vercel.app \| head -1` → `HTTP/2 200`). The `.vercel.app` URL must continue to work — the Stripe webhook endpoint still points here. If it 404s or redirects to the subdomain, check Vercel's redirect rules. |
+| B4 | The Stripe webhook endpoint on `.vercel.app` still accepts POSTs | `curl -sX POST https://<repo-name>.vercel.app/api/stripe/webhook -d '{}' -o /dev/null -w "%{http_code}"` — must be `400` (Stripe-signature error) or any non-3xx response. A 3xx redirect here means a Vercel redirect rule is catching the webhook path and the webhook is broken even if B3 passed. |
 
-If B2 fails after A5 passes: DNS is correct but Vercel hasn't provisioned the TLS cert yet. Wait 5 minutes and retry. If still failing after 10 minutes, remove and re-add the subdomain in Vercel Settings → Domains.
+If B1 fails after A5 (and A6, if applicable) passes: DNS is correct but Vercel hasn't provisioned the TLS cert yet, **or** the `_vercel` TXT (Scenario B) is missing or malformed. Order of investigation:
+1. Re-check A6 — confirm the TXT exists and is stored with the inner double-quotes.
+2. In Vercel dashboard → Domains, click **Refresh** next to the subdomain — sometimes Vercel needs a manual nudge to re-check.
+3. Wait 5 more minutes. If still failing after 10 minutes total, remove + re-add the subdomain in Vercel Settings → Domains (triggers fresh cert + verification).
 
-If B3 shows an expired or wrong-domain cert: Vercel's auto-renewal may have failed. Remove and re-add the subdomain.
+If B2 shows an expired or wrong-domain cert: Vercel's auto-renewal may have failed. Remove and re-add the subdomain.
 
-If B4 fails: **critical**. The Stripe webhook depends on this URL. Do NOT proceed until the `.vercel.app` URL is restored. Check if a Vercel redirect rule is sending `.vercel.app` traffic to the subdomain (this is fine for users, but breaks if the redirect applies to POST requests like webhooks). Verify by testing a POST: `curl -sX POST https://<repo-name>.vercel.app/api/stripe/webhook -d '{}' | head`.
+If B3 or B4 fails: **critical**. The Stripe webhook depends on `.vercel.app`. Do NOT call M3 done until both pass. Check if a Vercel redirect rule is sending `.vercel.app` traffic to the subdomain — fine for browser traffic but it'll break POSTs to the webhook.
 
 ### Section C — Supabase auth on the new subdomain (3 checks)
 
 | # | Check | How to verify |
 |---|---|---|
-| C1 | Supabase **Site URL** is set to the product subdomain | Supabase dashboard → Authentication → URL Configuration → Site URL. Must be `https://ai-video-speed-reader.<apex>`. If it still says `https://<repo-name>.vercel.app`, auth emails (password reset, magic link) will link to the old URL. Update it. |
+| C1 | Supabase **Site URL** is set to the product subdomain | Resolve project ref via `mcp__supabase_remote__get_project_url`, then open `https://supabase.com/dashboard/project/<ref>/auth/url-configuration`. **Site URL** must be `https://ai-video-speed-reader.<apex>`. If it still says `https://<repo-name>.vercel.app`, auth emails (password reset, magic link) will link to the old URL. Update it. |
 | C2 | Supabase **Redirect URLs** include the product subdomain | Same page → Redirect URLs. Must contain `https://ai-video-speed-reader.<apex>/**` (wildcard for all paths). The old `.vercel.app` redirect should also still be present (don't delete it). |
 | C3 | Sign-in works on the product subdomain | Browser test: go to `https://ai-video-speed-reader.<apex>`, sign out if signed in, sign back in. The auth flow must complete without errors. Check the browser URL bar — at no point should it redirect to `.vercel.app` during the auth flow (it should stay on the subdomain throughout). |
 

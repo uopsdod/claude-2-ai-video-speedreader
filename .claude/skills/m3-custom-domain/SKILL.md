@@ -10,7 +10,7 @@ description: Course 2 Milestone 3 — point an `ai-video-speed-reader.<your-doma
 Walks the student through Course 2 Milestone 3 end-to-end. By the end the student has:
 
 1. A Route 53 **hosted zone** for their domain (already registered in prerequisites) with NS records propagated to the TLD registry.
-2. A single CNAME record pointing the **`ai-video-speed-reader.<your-domain>.com`** subdomain at Vercel.
+2. A CNAME record (and, if Vercel requires ownership verification, an additional `_vercel` TXT record) pointing the **`ai-video-speed-reader.<your-domain>.com`** subdomain at Vercel.
 3. The subdomain added to the Vercel project, with Vercel's automatic HTTPS/TLS provisioning complete.
 4. The product site accessible at `https://ai-video-speed-reader.<your-domain>.com` — same M2 app, new URL.
 
@@ -22,8 +22,9 @@ Walks the student through Course 2 Milestone 3 end-to-end. By the end the studen
 
 **M3's scope (everything you're building in this skill):**
 - Add the `ai-video-speed-reader.<your-domain>.com` subdomain to the Vercel project
-- Add one CNAME record in Route 53 pointing the subdomain to Vercel (using the hosted zone created in prerequisites)
-- Verify HTTPS works end-to-end
+- Add a CNAME (and, if Vercel asks for it, a `_vercel` TXT ownership record) in Route 53 pointing the subdomain to Vercel — using the hosted zone created in prerequisites
+- Verify HTTPS works end-to-end via live fetch (the authoritative check — Vercel MCP's `get_project` does NOT list custom domains)
+- Confirm the existing `.vercel.app` URL still serves (Stripe webhook depends on it)
 - Update Supabase auth redirect URLs
 
 **What M3 does NOT change:**
@@ -78,10 +79,12 @@ M3 is entirely infrastructure configuration — no code edits, no `git push`. Al
 | Component | Operation | How |
 |---|---|---|
 | **Vercel** | Add the `ai-video-speed-reader.<your-domain>.com` subdomain to the project (Step 1, dashboard) | Vercel dashboard (Project → Settings → Domains) or `vercel domains add` CLI. **Vercel MCP cannot *add* domains** as of 2026-05 — no `add_domain` tool. |
-| **Vercel** | Verify the subdomain is attached (Step 1, post-add) | `mcp__vercel__get_project` returns the project's attached domains. Use to confirm the subdomain landed on the right project. |
-| **AWS Route 53** | Add one CNAME record for the subdomain (Step 2) | `call_aws route53 change-resource-record-sets ...` (hosted zone already exists from prereqs Section 4) |
-| **Vercel** | Verify HTTPS provisioning (Step 3) | `mcp__vercel__get_project` shows domain verification status; browser test confirms `https://ai-video-speed-reader.<your-domain>.com` loads with a valid TLS cert. |
-| **Supabase** | Update auth redirect URLs (Step 4) | Supabase dashboard → Authentication → URL Configuration. The MCP can't modify auth config. |
+| **Vercel** | Collect the records Vercel requests (Step 1) | Read all rows Vercel shows on the Add Domain confirmation: always a CNAME, sometimes also a `_vercel` TXT ownership record. The student pastes both back to Claude. |
+| **AWS Route 53** | Add the CNAME (and TXT, if any) for the subdomain (Step 2) | `call_aws route53 change-resource-record-sets ...` — one change-batch with one or two UPSERT entries. Hosted zone already exists from prereqs Section 4. |
+| **AWS Route 53** | Read records back for verification (Step 2) | `call_aws route53 list-resource-record-sets ... --query "..."` — Cowork-friendly substitute for `dig`. |
+| **Vercel** | Verify HTTPS via live fetch (Step 3) | `WebFetch` (or `mcp__vercel__web_fetch_vercel_url` if it accepts the host) — the **authoritative** check. `mcp__vercel__get_project` does NOT list custom domains, so don't use it as the gate. |
+| **Vercel** | Confirm `.vercel.app` still serves (Step 3) | `WebFetch` against the original `.vercel.app` URL. Stripe webhook depends on this URL. |
+| **Supabase** | Update auth redirect URLs (Step 4) | Supabase dashboard → Authentication → URL Configuration (deep-link via `get_project_url` ref). The MCP can't modify auth config. |
 
 ## The shape of the final system
 
@@ -94,9 +97,14 @@ Text-tree version of M3's DNS flow:
 ```
 Browser types: https://ai-video-speed-reader.<your-domain>.com
   └─ DNS resolver queries Route 53 hosted zone for <your-domain>.com
-       └─ CNAME ai-video-speed-reader → cname.vercel-dns.com.
+       └─ CNAME ai-video-speed-reader → <hash>.vercel-dns-NNN.com.
+            (per-project target Vercel issues — copy verbatim, do not assume)
+       └─ TXT  _vercel              → "vc-domain-verify=..."
+            (only present in "Scenario B" — when the apex was attached to
+             another Vercel team/project before; see Step 1)
   └─ Vercel receives the request
        └─ matches ai-video-speed-reader.<your-domain>.com to the project
+       └─ (one-time) reads _vercel TXT to confirm ownership, if Scenario B
        └─ auto-provisioned TLS cert (Let's Encrypt) for this subdomain
        └─ serves the same Next.js app as before
 
@@ -112,11 +120,15 @@ The skill is conversational — you (Claude Code) drive the student through 4 st
 
 ---
 
-### Step 1 — Add the `ai-video-speed-reader.<your-domain>.com` subdomain to Vercel
+### Step 1 — Add the `ai-video-speed-reader.<your-domain>.com` subdomain to Vercel + collect the DNS records Vercel asks for
 
 This step connects the product subdomain to the Vercel project so Vercel knows to serve your app when requests arrive at `ai-video-speed-reader.<your-domain>.com`. The apex (`<your-domain>.com`) and `www` stay untouched — students can use them later for other projects on the same domain.
 
-> **Vercel MCP gap (as of 2026-05):** The Vercel MCP exposes `get_project` (which returns the project's attached domains) and `list_projects`, but **no tool to *add* a custom domain to a project** and no tool to retrieve the required DNS records programmatically. **Domain attachment goes through the Vercel dashboard.** Once the student has done that, we use `mcp__vercel__get_project` to verify.
+> **Vercel MCP gaps (as of 2026-05) — confirmed from a real run, important:**
+> 1. The Vercel MCP has **no tool to *add* a custom domain** to a project — attachment goes through the Vercel dashboard (or `vercel domains add` CLI).
+> 2. `mcp__vercel__get_project` **does NOT list custom domains** in its `domains` / `alias` field — only the auto-generated `*.vercel.app` aliases appear there. **Do not use it as the gating verification** for "is my custom domain attached?". The authoritative checks are the Vercel dashboard status badge and a live HTTPS fetch of the subdomain (Step 3).
+>
+> So in this step: the student drives the dashboard, you (Claude) capture the records Vercel asks for, and verification is deferred to Step 3's HTTPS fetch.
 
 Tell the student:
 
@@ -125,35 +137,57 @@ Tell the student:
 > **Dashboard 路徑：**
 > 1. 到 https://vercel.com/dashboard
 > 2. 點你的 project（就是 M0 建的那個）
-> 3. **Settings** → **Domains**
+> 3. **Settings** → **Domains** （直接連結： `https://vercel.com/<team-slug>/<project-slug>/settings/domains`）
 > 4. 在輸入框打完整的 subdomain `ai-video-speed-reader.<your-domain>.com`（替換 `<your-domain>` 成你的 domain，例如 `ai-video-speed-reader.christine003.com`）→ 點 **Add**
-> 5. Vercel 會自動偵測這是 subdomain，會跟你說需要加一個 **CNAME record**：
+> 5. **仔細讀 Vercel 顯示的全部訊息** — 不要只看 CNAME。可能是下列其中一種情境：
+>
+>    **情境 A — 全新 domain（Vercel 從沒看過這個 apex）：**
+>    Vercel 只會要你加一個 CNAME，類似：
 >    - **Type**: CNAME
 >    - **Name**: `ai-video-speed-reader`
->    - **Value**: `cname.vercel-dns.com.`
-> 6. **先不要關這個頁面** — 我們下一步要去 Route 53 加這個 CNAME
+>    - **Value**: 一串長得像 `2781f4ac0e405e15.vercel-dns-017.com.` 的 **per-project target**（每個 project 不一樣，**直接複製 Vercel 顯示的那串，不要套用我給的範例值**）
 >
-> 如果 Vercel 顯示的 CNAME target 跟 `cname.vercel-dns.com` 不一樣（很少見），跟我說。」
+>    **情境 B — Vercel 說「This domain is linked to another Vercel account」（domain 在其他 Vercel team / project 用過）：**
+>    Vercel 會要你加 **兩個** records 證明你擁有這個 domain：
+>    - CNAME（同情境 A 的格式）
+>    - 一個 **TXT** ownership record，類似：
+>      - **Type**: TXT
+>      - **Name**: `_vercel`（注意是固定字串 `_vercel`，不是你的 subdomain）
+>      - **Value**: `vc-domain-verify=ai-video-speed-reader.<your-domain>.com,<random-token>`
+>
+>    這個 TXT 是 Vercel 用來驗證「你真的能控制這個 DNS zone」的 ownership challenge — 驗證完之後可以刪掉，但留著也無害。
+>
+> 6. **先不要關這個頁面** — 把 Vercel 顯示的「全部 records」（CNAME 一定有；TXT 可能有也可能沒有）原封不動 paste 給我，包括完整的 Name + Value。我會根據你貼的內容組 Route 53 的 change-batch。」
 
-**Why only a CNAME (no A record)?** For a subdomain you only need a CNAME pointing at Vercel's edge — Vercel resolves the actual IP. The apex (`<your-domain>.com`) is the case that needs an A record (DNS doesn't allow CNAME on the apex). Since we're not configuring the apex, we don't need any A record.
+> **Why the ownership TXT is likely, not rare:** the M3 prereqs explicitly recommend a personal-namespace apex (`<yourname>.com`) that gets reused across multiple projects on the same Vercel account or team. Once the apex has ever been attached to a *different* Vercel project / team than the one you're adding it to now, Vercel gates the new attachment behind the `_vercel` TXT check. If the student already added e.g. `subtitle.<your-domain>.com` on a different team, they will hit this. Treat it as the default branch.
+
+> **Why the CNAME target is project-specific, not `cname.vercel-dns.com`:** Vercel's current behavior is to issue a per-project target like `<hash>.vercel-dns-NNN.com.` (the older `cname.vercel-dns.com` shorthand still resolves but Vercel rarely shows it as the recommended value anymore). Always copy the exact value Vercel's Domains page displays — do not assume.
+
+**Why only DNS records, no app code, no A record?** For a subdomain you only need a CNAME pointing at Vercel's edge (plus the TXT if Vercel asks). The apex (`<your-domain>.com`) is the case that needs an A record (DNS doesn't allow CNAME on the apex). Since we're not configuring the apex, we don't need any A record.
 
 **CLI fallback:**
 ```bash
 vercel domains add ai-video-speed-reader.<your-domain>.com
-# Follow the prompts — Vercel will print the required CNAME
+# Follow the prompts — Vercel will print the required records.
+# Read ALL of them, not just the CNAME.
 ```
 
-**Verify via MCP before moving on.** Use `mcp__vercel__list_projects` to get the project ID (and team ID if not already known), then call `mcp__vercel__get_project`. The returned project object's `alias` / `domains` field should now contain `ai-video-speed-reader.<your-domain>.com`. It'll likely show a verification status indicating DNS isn't configured yet — that's expected until we add the CNAME in Step 2.
+**Before moving on, you (Claude) should have captured from the student:**
+- ✅ The exact CNAME target Vercel showed (a `<hash>.vercel-dns-NNN.com.` value).
+- ✅ Whether Vercel also asked for a `_vercel` TXT ownership record, and if so, its exact value.
+- ✅ Confirmation that the subdomain appears in the Vercel Domains page (with a "Pending" or "Invalid Configuration" badge for now — that's expected until Step 2 adds the records).
 
-If the subdomain doesn't appear in `get_project`'s response: the student added it to the wrong project, or the Add didn't actually save. Re-check the Vercel dashboard URL — confirm they're on the Settings page of the M0 project (the one with the latest M2 deployment), not a different project.
+**Do not rely on `mcp__vercel__get_project` to confirm the subdomain is attached.** It will not list custom domains. Trust the dashboard view + (in Step 3) the live HTTPS fetch instead.
 
 ---
 
-### Step 2 — Add the CNAME record in Route 53
+### Step 2 — Add the CNAME (and `_vercel` TXT, if Vercel asked for one) in Route 53
 
-Now wire the subdomain to Vercel by adding the CNAME Vercel requested in Step 1.
+Wire the subdomain to Vercel by adding the records you collected in Step 1.
 
-Use the hosted zone ID saved from `m3-custom-domain-prerequisites` Section 4. One CNAME record is all we need:
+Use the hosted zone ID saved from `m3-custom-domain-prerequisites` Section 4. The change-batch shape depends on which scenario Step 1 returned:
+
+**Scenario A — CNAME only (fresh domain, Vercel didn't ask for ownership TXT):**
 
 ```
 call_aws route53 change-resource-record-sets \
@@ -166,16 +200,49 @@ call_aws route53 change-resource-record-sets \
           "Name": "ai-video-speed-reader.<your-domain>.com",
           "Type": "CNAME",
           "TTL": 300,
-          "ResourceRecords": [{"Value": "cname.vercel-dns.com"}]
+          "ResourceRecords": [{"Value": "<paste the exact CNAME target Vercel showed in Step 1>"}]
         }
       }
     ]
   }'
 ```
 
-> **Use the CNAME target Vercel gave you in Step 1**, not the hardcoded `cname.vercel-dns.com` above. The target is stable as of 2026-05 but always cross-check against what the Vercel Domains page shows.
+**Scenario B — CNAME + `_vercel` TXT ownership record (Vercel said "linked to another Vercel account"):**
 
-The `change-resource-record-sets` call returns a `ChangeInfo` with `Status: PENDING`. DNS propagation is typically 30–60 seconds for Route 53 (since both registrar and DNS are Route 53, propagation is fast). Check status:
+```
+call_aws route53 change-resource-record-sets \
+  --hosted-zone-id <zone-id> \
+  --change-batch '{
+    "Changes": [
+      {
+        "Action": "UPSERT",
+        "ResourceRecordSet": {
+          "Name": "ai-video-speed-reader.<your-domain>.com",
+          "Type": "CNAME",
+          "TTL": 300,
+          "ResourceRecords": [{"Value": "<paste the exact CNAME target Vercel showed>"}]
+        }
+      },
+      {
+        "Action": "UPSERT",
+        "ResourceRecordSet": {
+          "Name": "_vercel.<your-domain>.com",
+          "Type": "TXT",
+          "TTL": 300,
+          "ResourceRecords": [{"Value": "\"<paste the exact TXT value Vercel showed, including the vc-domain-verify=... part>\""}]
+        }
+      }
+    ]
+  }'
+```
+
+> **TXT quoting rule (Route 53 specific):** Route 53 stores TXT values with **embedded double-quotes**. The raw value Vercel shows is something like `vc-domain-verify=ai-video-speed-reader.<your-domain>.com,9a414e4c759a2678f507`. In the Route 53 change-batch JSON, that becomes `"Value": "\"vc-domain-verify=...\""` (note the escaped inner quotes). If you forget the inner quotes, Route 53 will accept it but DNS resolvers won't return the value correctly and Vercel's ownership check will fail.
+
+> **Always use the exact CNAME target Vercel showed in Step 1** (typically a `<hash>.vercel-dns-NNN.com.` per-project value). Do not paste a memorized `cname.vercel-dns.com` — Vercel's current behavior is to issue a project-specific target, and the documentation page lags reality.
+
+Both records (if you have two) can — and should — go in **one** `change-resource-record-sets` call. That way one `get-change` poll covers both.
+
+The call returns a `ChangeInfo` with `Status: PENDING`. DNS propagation is typically 30–60 seconds for Route 53 (since both registrar and DNS are Route 53, propagation is fast). Check status:
 
 ```
 call_aws route53 get-change --id <change-id>
@@ -185,33 +252,70 @@ Wait until `Status` is `INSYNC`.
 
 Tell the student:
 
-> 「CNAME record 已經加好。通常 30 秒到 1 分鐘就會生效（因為你的 domain 和 DNS 都在 Route 53，propagation 很快）。接下來等 Vercel 偵測到 DNS 正確，它會自動幫你發 TLS 憑證。」
+> 「DNS records 已經加好（CNAME{% if 有 TXT %} + ownership TXT{% endif %}）。通常 30 秒到 1 分鐘就會生效。接下來 Vercel 會自動偵測 DNS、驗證 ownership（如果有 TXT）、然後發 TLS 憑證 — 整個過程 1–5 分鐘。」
 
-**Verify before moving on:**
-1. `get-change` returns `INSYNC`.
-2. `dig ai-video-speed-reader.<your-domain>.com CNAME +short` returns `cname.vercel-dns.com.` (or whatever target Vercel showed in Step 1).
+**Verify before moving on (in this order):**
 
-If `dig` is not available (Cowork mode), skip to Step 3 — the Vercel dashboard will show the DNS status.
+1. **`get-change` returns `INSYNC`** — confirms Route 53 has accepted the change.
+
+2. **Read the records back via the API** to confirm they're stored correctly:
+
+   ```
+   call_aws route53 list-resource-record-sets \
+     --hosted-zone-id <zone-id> \
+     --query "ResourceRecordSets[?Name=='ai-video-speed-reader.<your-domain>.com.' || Name=='_vercel.<your-domain>.com.']"
+   ```
+
+   - CNAME row: `Value` should match what Vercel showed in Step 1 verbatim.
+   - TXT row (if Scenario B): `Value` should be the quoted `vc-domain-verify=...` string. The Route 53 API will return it *with* the outer quotes — that's correct.
+
+3. **(Optional) `dig` cross-check, if available locally:**
+   ```
+   dig ai-video-speed-reader.<your-domain>.com CNAME +short
+   dig _vercel.<your-domain>.com TXT +short    # only if Scenario B
+   ```
+
+The read-back via `list-resource-record-sets` is the Cowork-friendly equivalent of `dig` — it gives you actual confirmation of the stored values, not just "the API didn't error." Use it before deferring anything to the Vercel dashboard.
 
 ---
 
-### Step 3 — Verify HTTPS and Vercel domain status
+### Step 3 — Verify HTTPS on the subdomain (authoritative) and that the old `.vercel.app` URL still works
 
-Vercel auto-provisions a TLS certificate via Let's Encrypt — this takes 1–5 minutes after DNS propagates. Verify both via MCP (project state) and via browser (real HTTPS check).
+Vercel auto-provisions a TLS certificate via Let's Encrypt — typically 1–5 minutes after DNS propagates (or, in Scenario B, after both DNS and the `_vercel` TXT ownership check propagate).
 
-**MCP check first:** call `mcp__vercel__get_project` for the project ID. The returned `alias` / `domains` field should now show `ai-video-speed-reader.<your-domain>.com` as **verified** (no `verification` array indicating outstanding TXT challenges, no `Invalid Configuration` status). If it's still showing pending verification after 5 minutes, return to Step 2 and re-verify the CNAME record.
+**The authoritative verification is a live HTTPS fetch, NOT `mcp__vercel__get_project`.** `get_project.domains` only lists `*.vercel.app` aliases; it does not show custom domains attached to the project, even after they're fully verified. So we verify by fetching the subdomain over HTTPS and confirming we get the app back.
+
+**Check 1 — Live HTTPS fetch of the new subdomain:**
+
+```
+mcp__vercel__web_fetch_vercel_url url=https://ai-video-speed-reader.<your-domain>.com
+```
+
+Or, if `web_fetch_vercel_url` rejects the URL because it's not a `.vercel.app` host (it's domain-restricted), fall back to a plain HTTPS request via `WebFetch`:
+
+```
+WebFetch url=https://ai-video-speed-reader.<your-domain>.com prompt="Return the page title and the first 200 characters of body HTML."
+```
+
+Expected: HTTP 200, the response body contains the Video Speed Reader landing page markup (or whatever the M0/M2 root page renders). If you see a Vercel-branded 404, a TLS error, or a "domain not configured" page, see Troubleshooting below.
+
+**Check 2 — Confirm the `.vercel.app` URL still serves:**
+
+```
+WebFetch url=https://<repo-name>.vercel.app prompt="Return HTTP status and the first 200 characters of body."
+```
+
+Expected: HTTP 200. The Stripe webhook still points at this URL, so it absolutely must keep working. If this fails, do not call M3 done — the webhook is broken even though the subdomain may be fine.
 
 **Then ask the student to verify in browser:**
 
-> 「Vercel MCP 顯示你的 subdomain 已經 verified。回到 Vercel 的 Domains 頁面確認：
-> 1. `ai-video-speed-reader.<your-domain>.com` 應該顯示 ✅ Valid Configuration
-> 2. 如果還顯示 ⚠️ 或 ❌，等 2–3 分鐘再刷新 — TLS 憑證發行需要一點時間
+> 「我從程式 HTTPS 抓 `https://ai-video-speed-reader.<your-domain>.com` 已經回 200 + 你的 app 內容了。請在瀏覽器再確認一次：
 >
-> 變成 ✅ 之後，開一個新的瀏覽器分頁：
-> - 打開 `https://ai-video-speed-reader.<your-domain>.com`
-> - 確認是你的 Video Speed Reader 頁面
-> - 確認瀏覽器地址欄有 🔒（鎖頭圖示 = HTTPS 生效）
-> - 試一次 sign in — 確認 Supabase auth 在新 subdomain 下還能用
+> 1. 到 Vercel dashboard → Settings → Domains（[直接連結](https://vercel.com/dashboard)）— `ai-video-speed-reader.<your-domain>.com` 應該顯示 ✅ Valid Configuration（如果還在 ⚠️ 等 2–3 分鐘再刷新；TLS 憑證發行需要時間）
+> 2. 開新分頁打開 `https://ai-video-speed-reader.<your-domain>.com`
+>    - 確認是你的 Video Speed Reader 頁面
+>    - 確認瀏覽器地址欄有 🔒（鎖頭圖示 = HTTPS 生效）
+>    - 試一次 sign in — 確認 Supabase auth 在新 subdomain 下還能用（這需要先做完 Step 4；如果 Step 4 還沒做，sign-in 失敗是預期的）
 >
 > 都 OK 的話跟我說！」
 
@@ -219,11 +323,13 @@ Vercel auto-provisions a TLS certificate via Let's Encrypt — this takes 1–5 
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| Vercel shows "Invalid Configuration" after 5+ minutes | CNAME wrong or not propagated yet | Re-check Step 2's record. `dig ai-video-speed-reader.<your-domain>.com CNAME +short` — should return `cname.vercel-dns.com.` If it returns nothing, the `change-resource-record-sets` call may have failed silently — re-run it. |
+| Vercel dashboard shows "Invalid Configuration" / "Pending" 5+ minutes after Step 2 INSYNC | CNAME wrong, TXT missing or malformed, or propagation lag at Vercel's checker (not DNS) | (1) Re-read the records via `list-resource-record-sets` (Step 2 verify check) and compare exactly to what Vercel asked for. (2) If Scenario B: confirm the `_vercel` TXT is present and stored with the correct inner double-quotes. (3) If everything looks right, click **Refresh** in the Vercel Domains UI — it sometimes needs a manual nudge. |
+| Vercel shows "This domain is linked to another Vercel account" when the student first adds the subdomain | Apex was attached to a different Vercel team/project at some point. **Expected** for any reused personal-namespace apex (see Step 1, Scenario B). | Add the `_vercel` TXT record alongside the CNAME (Step 2, Scenario B). |
 | HTTPS works but sign-in fails (redirect error) | Supabase auth redirect URL doesn't include the new subdomain | Go to Supabase dashboard → Authentication → URL Configuration → **Redirect URLs** → add `https://ai-video-speed-reader.<your-domain>.com/**`. See Step 4. |
-| Subdomain shows Vercel 404 instead of the app | The subdomain isn't attached to the correct Vercel project | Verify via `mcp__vercel__get_project` that the subdomain is on the M0 project, not a different one. |
-| Browser shows "NET::ERR_CERT_COMMON_NAME_INVALID" | TLS cert hasn't been provisioned yet | Wait 5 more minutes. Vercel retries automatically. If still broken after 10 minutes, remove + re-add the subdomain in Vercel. |
+| Subdomain shows Vercel 404 / "DEPLOYMENT_NOT_FOUND" instead of the app | The subdomain is attached to the wrong Vercel project (a different project under the same account) | Go to the Vercel project's Settings → Domains and confirm the subdomain is listed under the M0/M2 project, not e.g. a previous experiment. Remove + re-add on the correct project if needed. |
+| Browser shows "NET::ERR_CERT_COMMON_NAME_INVALID" / "ERR_CERT_AUTHORITY_INVALID" | TLS cert hasn't been provisioned yet | Wait 5 more minutes. Vercel retries automatically. If still broken after 10 minutes, remove + re-add the subdomain in Vercel (the re-add triggers a fresh cert request). |
 | Apex `<your-domain>.com` returns NXDOMAIN | **Expected** — M3 doesn't configure the apex. The product URL is the subdomain. | Not a problem. The apex is intentionally unconfigured so the student can use it later. |
+| The old `.vercel.app` URL stops returning 200 (404, redirect to subdomain, anything else) | Someone added a Vercel redirect rule that catches the `.vercel.app` host | **Critical** — Stripe webhook depends on `.vercel.app`. Remove the redirect rule, or scope it so POST requests to `/api/stripe/webhook` are excluded. Test with `curl -sX POST https://<repo-name>.vercel.app/api/stripe/webhook -d '{}' \| head` — should return a Stripe-error 400, not a 30x. |
 
 ---
 
@@ -231,16 +337,27 @@ Vercel auto-provisions a TLS certificate via Let's Encrypt — this takes 1–5 
 
 Supabase auth only redirects to URLs listed in **Authentication → URL Configuration → Redirect URLs**. The current list has the `.vercel.app` URL from M0. Add the new subdomain.
 
-Tell the student:
+First, resolve the Supabase project ref so you can give the student a deep link to the right page:
+
+```
+mcp__supabase_remote__get_project_url
+```
+
+Returns something like `https://<ref>.supabase.co`. The URL-configuration page for that project is then:
+
+```
+https://supabase.com/dashboard/project/<ref>/auth/url-configuration
+```
+
+Tell the student (substituting the deep link):
 
 > 「最後一步 — 讓 Supabase auth 認識你的新 subdomain：
 >
-> 1. 到 Supabase dashboard → 你的 project
-> 2. **Authentication** → **URL Configuration**
-> 3. **Site URL**: 改成 `https://ai-video-speed-reader.<your-domain>.com`（這是 Supabase auth email 裡的連結會指向的 URL）
-> 4. **Redirect URLs**: 加入 `https://ai-video-speed-reader.<your-domain>.com/**`（允許所有子路徑）
+> 1. 直接打開：`https://supabase.com/dashboard/project/<ref>/auth/url-configuration`（這是你 Supabase project 的 URL Configuration 頁面 — 不用在 sidebar 裡點來點去找）
+> 2. **Site URL**: 改成 `https://ai-video-speed-reader.<your-domain>.com`（這是 Supabase auth email 裡的連結會指向的 URL）
+> 3. **Redirect URLs**: 加入 `https://ai-video-speed-reader.<your-domain>.com/**`（允許所有子路徑）
 >    - **保留** 舊的 `https://<repo-name>.vercel.app/**` — 不要刪掉，因為 Stripe webhook 還指向它，而且開發時也可能用到
-> 5. 儲存
+> 4. 點右上 **Save**
 >
 > 測試：登出再登入一次 `https://ai-video-speed-reader.<your-domain>.com` — 應該正常。」
 

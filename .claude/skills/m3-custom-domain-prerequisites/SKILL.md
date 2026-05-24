@@ -115,6 +115,8 @@ Before buying, the student should know what they're signing up for:
 The student registers the domain through the AWS Console (not via MCP/CLI). This is a one-time purchase that involves entering personal contact info — easier and safer to do directly in the browser.
 
 > **Pick a personal-namespace apex, not a product name.** M3 will host the AI Video Speed Reader at `ai-video-speed-reader.<your-domain>.com` (a subdomain), so the apex itself can be reused for future projects on the same domain — landing page, blog, second product, etc. Recommended pattern: pick something short and personal like `christine003.com` / `ted007.com` / `<yourname><number>.com`, NOT a product-specific name like `videospeedreader.com` (you'd box yourself in).
+>
+> **Heads-up for students who already used this apex on a different Vercel account/team/project:** when the main M3 skill adds the subdomain, Vercel will detect prior association and ask for a `_vercel` TXT ownership record in addition to the CNAME. This is normal and handled in `m3-custom-domain` Step 1 / Step 2 (Scenario B). No action needed here — just don't panic when you see "This domain is linked to another Vercel account" later.
 
 Tell the student:
 
@@ -181,9 +183,9 @@ Must return 4 NS records (Route 53's name servers). These are auto-configured wh
 3. The student has clicked the ICANN verification email.
 4. The hosted zone ID is saved (for use in the main M3 skill).
 
-## Sanity check before starting `m3-custom-domain`
+## Sanity check at the end (final state)
 
-Before invoking the main M3 skill, confirm all of these:
+After running through this skill, confirm all of these:
 
 1. ✅ All 4 Cowork connectors are authenticated and returning data (Section 1).
 2. ✅ M2 is green (Section 2).
@@ -191,7 +193,21 @@ Before invoking the main M3 skill, confirm all of these:
 4. ✅ The domain is registered in Route 53 and a hosted zone exists (Section 4).
 5. ✅ The ICANN verification email has been confirmed (Section 4).
 
-If any fail, fix here. Don't proceed to the main skill with unresolved issues.
+If any fail, fix here.
+
+## ⛔ STOP HERE — Do NOT proceed to M3 implementation
+
+**This skill is a prerequisite check only.** When all 5 items above are ✅, your job is **done**. Report the green status back to the student and **stop**.
+
+Do **NOT**:
+- ❌ Automatically load or invoke `m3-custom-domain` (the main M3 walkthrough)
+- ❌ Ask the student "ready to start M3?" or "shall we proceed to Step 1?" or any variant
+- ❌ Start adding the subdomain to Vercel, creating DNS records, or any other M3 implementation step
+- ❌ Pre-fetch or stage information for the main skill ("just in case")
+
+The student will explicitly invoke `m3-custom-domain` when they're ready. The boundary between prerequisites and implementation is **intentional** — students may want to take a break, double-check pricing on the AWS bill, register a domain on a different day, or just confirm the readiness state without committing to the next 30–60 minutes of work. Respect that boundary.
+
+If the student says something like "OK, what's next?" or "let's keep going" after the prereq finishes green, the correct response is to **tell them what the next skill is** (`m3-custom-domain`) and let them decide whether to invoke it now or later. Do not load it for them.
 
 ## Related skills
 
