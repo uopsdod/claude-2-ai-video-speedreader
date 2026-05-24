@@ -94,27 +94,46 @@ In the AWS console (browser):
    - **Secret access key** — looks like `wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY`
 4. Copy both somewhere safe (password manager). If you close this page without copying the secret, AWS won't show it again — you'll have to delete the key and make a new one.
 
-#### 2.0.3 — Paste into Cowork's AWS API MCP settings
+#### 2.0.3 — Write the credentials into `~/.aws/credentials` via Claude Code CLI
 
-1. In Cowork: open the AWS API MCP connector / plugin settings (the same screen you used to install the connector).
-2. Fill in:
-   - **AWS Access Key ID:** `AKIA...` from 2.0.2
-   - **AWS Secret Access Key:** `wJalrXUt...` from 2.0.2
-   - **Region:** the same one you picked in 2.1 (`us-west-2`, `ap-northeast-1`, or `ap-southeast-1`)
-3. Save. Cowork should now show the AWS API MCP as connected.
+> **Why not just paste into Cowork's MCP settings UI?** Cowork's AWS API MCP reads credentials from the local AWS credentials file (`~/.aws/credentials` on Mac/Linux, `%USERPROFILE%\.aws\credentials` on Windows) — it does **not** have a UI field to type them into, and the Cowork sandbox can't read or write that file for you. The workaround: open **Claude Code CLI** locally, paste the prompt below, and let Claude Code write the file. Once written, restart Cowork and the AWS API MCP picks the credentials up automatically.
 
-#### 2.0.4 — Verify (one MCP call)
+1. Open the **Claude Code CLI** on the same machine where Cowork is running (`claude` in a terminal — install per https://claude.com/claude-code if you haven't).
+2. Paste this prompt verbatim, substituting your `AKIA...` and secret from 2.0.2:
 
-Run a harmless read to confirm credentials work:
+   ```
+   I have new AWS credentials I want to configure. Please write them to my AWS credentials file. Here are the values:
+   Access key ID: <paste AKIA... from 2.0.2>
+   Secret access key: <paste wJalrXUt... from 2.0.2>
+   First, detect whether I'm on Mac/Linux or Windows to determine the correct credentials file path
+   (~/.aws/credentials on Mac/Linux, %USERPROFILE%\.aws\credentials on Windows), 
+   then write the [default] profile with the new values — preserving any other existing profiles in the file.
+   Once done, test the connection using aws sts get-caller-identity.
+   ```
+
+3. Claude Code will: detect your OS → append/update the `[default]` profile in the credentials file (preserving any other profiles) → run `aws sts get-caller-identity` to confirm.
+4. Expect the final `aws sts get-caller-identity` output to be a JSON object with:
+   - `UserId` ending in `:cowork-m1`
+   - `Arn` ending in `user/cowork-m1`
+   - An `Account` number matching the AWS account you signed up with
+
+If `aws sts get-caller-identity` returns `Unable to locate credentials` or `InvalidClientTokenId`, the key/secret were typo'd or truncated on copy. Delete the key in IAM, create a new one, re-run the prompt above.
+
+5. **Set the region** for the `[default]` profile so AWS API MCP knows which region to target. In the same Claude Code CLI session:
+
+   ```
+   Also write `region = <us-west-2 | ap-northeast-1 | ap-southeast-1 — the one you picked in 2.1>` and `output = json` to the [default] profile in ~/.aws/config (or %USERPROFILE%\.aws\config on Windows).
+   ```
+
+6. **Restart Cowork** so the AWS API MCP re-reads the credentials file. After restart, Cowork should show AWS API MCP as connected.
+
+#### 2.0.4 — Verify via Cowork (one MCP call)
+
+Back in Cowork, run a harmless read to confirm the AWS API MCP can see the credentials Claude Code CLI just wrote:
 
 `call_aws sts get-caller-identity`
 
-Expect a JSON response with:
-- `UserId` ending in `:cowork-m1`
-- `Arn` ending in `user/cowork-m1`
-- An `Account` number matching the AWS account you signed up with
-
-If you get `Unable to locate credentials` or `InvalidClientTokenId`: the key/secret were typo'd or got truncated on copy. Delete the key in IAM and create a new one.
+Same expected output as the Claude Code CLI check in 2.0.3 step 4. If Cowork's MCP call fails but the CLI call succeeded, you most likely skipped the Cowork restart in 2.0.3 step 6 — restart Cowork and try again.
 
 #### 2.0.5 — End-of-course cleanup (set this reminder NOW)
 
@@ -128,7 +147,7 @@ Add a calendar reminder for ~6 weeks out: "Delete cowork-m1 access key if Course
 
 #### 2.0.6 — CLI-mode variant (skip if you're in Cowork)
 
-CLI-mode students do the same 2.0.1 + 2.0.2, then instead of pasting into Cowork:
+CLI-mode students do the same 2.0.1 + 2.0.2, then run `aws configure` directly in a terminal instead of going through the Claude Code CLI prompt:
 
 ```bash
 aws configure
@@ -138,7 +157,7 @@ aws configure
 # Default output format: json
 ```
 
-`aws sts get-caller-identity` does the same verify as 2.0.4.
+`aws sts get-caller-identity` does the same verify as 2.0.4. (The Claude Code CLI path in 2.0.3 is essentially `aws configure` wrapped in a chat prompt — useful when the student doesn't want to remember the `aws configure` flags but is comfortable with Claude Code.)
 
 ### 2.2 — Create the IAM instance profile (one MCP call)
 
