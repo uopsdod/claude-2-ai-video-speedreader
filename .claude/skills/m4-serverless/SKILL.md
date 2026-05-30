@@ -23,7 +23,9 @@ Walks the student through Course 2 Milestone 4 end-to-end. By the end the studen
 
 ## GitHub's role in M4: load-bearing build source (not just documentation)
 
-The student **edits the worker/infra files in the workspace and pushes them to their own GitHub repo.** In M4 that push is **required, not optional** — CodeBuild reads the repo as its build source, so **if the worker code isn't pushed, there is no image to build.** GitHub is load-bearing here, not a "for the record" nicety.
+The student **edits the worker/infra files in the workspace and pushes them to their own GitHub repo.** In M4 that push is **required and active, not optional or document-only** — once the webhook is set up (Step 3f), **a `git push` to the worker is what triggers the image build.** CodeBuild reads the repo as its build source and rebuilds on push, so **if the worker code isn't pushed, no new image is built.** GitHub is the deploy trigger for business-logic code, not a "for the record" nicety.
+
+This is the deliberate **business-logic vs infrastructure split**: the worker code (changes often) ships by `git push` → webhook → rebuild; the infrastructure (Lambda, ECS task def, EventBridge, IAM, ECR — changes rarely) is set up once via `call_aws` and left alone.
 
 Be precise about which files are build-critical vs. record-only:
 
@@ -84,10 +86,10 @@ M4 adds **five AWS services** (ECR, ECS Fargate, Lambda, EventBridge, CodeBuild)
 Text-tree of M4's two flows — **build-time** and **run-time** — neither touches the EC2:
 
 ```
-BUILD-TIME (once per worker code change):
+BUILD-TIME (automatic on every worker code change):
   edit worker/ + buildspec.yml → git push to GitHub repo
-       └─ call_aws codebuild start-build   (source = GitHub repo)
-            └─ ephemeral x86_64 builder: docker build → docker push → ECR
+       └─ CodeBuild GitHub webhook fires on push to main   (no manual start-build)
+            └─ ephemeral x86_64 builder: docker build → docker push → ECR :latest
 
 RUN-TIME (every job):
   [Browser] → [Vercel] → POST /api/jobs → [Supabase: jobs + job_sessions]
@@ -115,7 +117,7 @@ RUN-TIME (every job):
 |---|---|---|
 | **Supabase** | Add `fargate_task_arn` column | `mcp__supabase_remote__apply_migration` (Cowork) / migration file + `supabase db push` (CLI). **Always a migration file** (see [[supabase-best-practice]]). |
 | **GitHub** | Push worker `Dockerfile` + `buildspec.yml` + Lambda handler | normal `git push` (auth per environment — see prereq §4a). Source of truth + CodeBuild input. |
-| **CodeBuild** | Build the worker image from GitHub → ECR | `call_aws codebuild create-project` / `start-build` / `batch-get-builds`. **No EC2, no local Docker.** |
+| **CodeBuild** | Build the worker image from GitHub → ECR, auto on push | `call_aws codebuild create-project` + `import-source-credentials` + `create-webhook`; one manual `start-build` to verify, then push-triggered. **No EC2, no local Docker.** |
 | **ECR** | Hold the worker image | `call_aws ecr create-repository`; CodeBuild pushes. |
 | **ECS** | Cluster + task definition | `call_aws ecs create-cluster` / `register-task-definition`. |
 | **IAM** | Task exec role, worker task role, Lambda role, **CodeBuild role** | `call_aws iam create-role` / `attach-role-policy` / `put-role-policy`. |
@@ -192,7 +194,11 @@ Confirm with the student before pushing (outward action).
 
 ---
 
-### Step 3 — Create the ECR repo + the CodeBuild project, then build
+### Step 3 — Create the ECR repo + CodeBuild project, verify a first build, then turn on push-to-build
+
+This step is where the **business-logic / infrastructure split** shows up concretely. The image *build* is the part that changes often (every worker code edit), so we make it **trigger on `git push`**. The CodeBuild project, role, and ECR repo are infrastructure — created once here by `call_aws`, then rarely touched.
+
+> **The plan for this step:** create the ECR repo + role + project (one-time infra) → **manually run one build and verify it** (proves the buildspec/role/ECR wiring in isolation) → **then register a GitHub webhook** so every future worker push rebuilds automatically with no `start-build`.
 
 **3a. ECR repo:**
 ```
@@ -208,28 +214,39 @@ call_aws iam attach-role-policy --role-name subtitleCodeBuildRole --policy-arn a
 call_aws iam attach-role-policy --role-name subtitleCodeBuildRole --policy-arn arn:aws:iam::aws:policy/CloudWatchLogsFullAccess
 ```
 
-**3c. Create the CodeBuild project** — GitHub source, Linux container, **privileged mode** (required for `docker build`):
+**3c. Connect CodeBuild to GitHub (mandatory — the webhook needs it).** Import a GitHub PAT into CodeBuild once per AWS account. **This is required even for a public repo**, because registering a webhook needs repo-admin access — so the PAT must have **`repo` + `admin:repo_hook`** scope (not just `repo`):
+```
+call_aws codebuild import-source-credentials --token <PAT> --server-type GITHUB --auth-type PERSONAL_ACCESS_TOKEN
+```
+The token is stored in CodeBuild (used at build time + to register the webhook), not in the repo or the Cowork session beyond this call. Treat it as a secret; revoke at course end.
+
+**3d. Create the CodeBuild project** — GitHub source, Linux container, **privileged mode** (required for `docker build`):
 ```
 call_aws codebuild create-project --name subtitle-worker-build \
   --source 'type=GITHUB,location=https://github.com/<gh-user>/<repo>.git,buildspec=buildspec.yml' \
+  --source-version main \
   --artifacts 'type=NO_ARTIFACTS' \
   --environment 'type=LINUX_CONTAINER,image=aws/codebuild/standard:7.0,computeType=BUILD_GENERAL1_SMALL,privilegedMode=true,environmentVariables=[{name=ECR_URI,value=<repositoryUri>}]' \
   --service-role <subtitleCodeBuildRole ARN>
 ```
 > **`privilegedMode=true` is mandatory** — without it the build container can't run the Docker daemon and `docker build` fails. This is the CodeBuild equivalent of the arch/Docker traps in a local build.
-> **GitHub source auth:** a public repo needs nothing. A private repo needs CodeBuild connected to GitHub once — `call_aws codebuild import-source-credentials --token <PAT> --server-type GITHUB --auth-type PERSONAL_ACCESS_TOKEN` (the PAT needs `repo` scope; it's stored in CodeBuild, used only at build time).
 
-**3d. Build:**
+**3e. Run ONE manual build and verify it** — *before* trusting the webhook. This proves the buildspec, role, and ECR wiring in isolation, so any setup error surfaces here rather than as a confusing webhook failure later. **You (Claude) run and verify this directly:**
 ```
 call_aws codebuild start-build --project-name subtitle-worker-build
+call_aws codebuild batch-get-builds --ids <build-id from start-build>   # poll until buildStatus → SUCCEEDED
+call_aws ecr list-images --repository-name subtitle-worker              # confirms a latest tag
 ```
+If `buildStatus` is `FAILED`, read the project's CloudWatch log group — usual causes: missing `privilegedMode`, role lacks ECR push, `buildspec.yml` path mismatch, or the GitHub PAT in 3c lacks `repo` scope. **Fix and re-run until SUCCEEDED. Do not proceed to 3f on a failed build.**
 
-**Verify before moving on:** poll the build to completion, then confirm the image:
+**3f. Turn on push-to-build (the webhook).** Now that a build is proven green, register a webhook so every push to `main` that touches the worker rebuilds automatically — no more manual `start-build`:
 ```
-call_aws codebuild batch-get-builds --ids <build-id from start-build>   # buildStatus → SUCCEEDED
-call_aws ecr list-images --repository-name subtitle-worker              # shows latest
+call_aws codebuild create-webhook --project-name subtitle-worker-build \
+  --filter-groups '[[{"type":"EVENT","pattern":"PUSH"},{"type":"HEAD_REF","pattern":"^refs/heads/main$"}]]'
 ```
-If `buildStatus` is `FAILED`, read the CodeBuild logs (`call_aws logs ...` for the project's log group) — usual causes: missing `privilegedMode`, ECR login perms, or a `buildspec.yml` path mismatch.
+> Optional tightening: add a `{"type":"FILE_PATH","pattern":"^worker/"}` clause to the filter group so only worker-path changes trigger a rebuild (avoids rebuilding when only docs change). Keep it simple (PUSH on `main`) if unsure.
+
+**Verify before moving on:** `call_aws codebuild batch-get-projects --names subtitle-worker-build` → the response now has a `webhook` block with a `url` and the PUSH/`main` filter group. From here, **a `git push` to the worker is the deploy** — CodeBuild rebuilds and pushes `:latest` with no human `start-build`.
 
 ---
 
@@ -324,7 +341,7 @@ Tell the student: 「我已經幫你把 EC2 worker 停掉了（stop，不是 ter
 
 1. Submit a real job on the product URL; within ~1 min the Lambda spawns a Fargate task and stamps `fargate_task_arn`; the next tick skips it (idempotency).
 2. Job advances `pending → … → done` on Fargate; logs in `/ecs/subtitle-worker`. The EC2 is `stopped` throughout (still there as a fallback, but unused).
-3. **Future worker changes** = edit `worker/`, `git push`, `call_aws codebuild start-build`, then either let new Fargate tasks pull `:latest` or force-new. **No EC2 ever re-enters the loop.**
+3. **Future worker changes are just a `git push`.** Edit `worker/`, `git push origin main` → the CodeBuild **webhook rebuilds + pushes `:latest` automatically** (no `start-build`); new Fargate tasks pull the new image (force-new if you want it immediately). **No EC2 ever re-enters the loop, and no manual build step.** This is the business-logic-rollout half of M4: code changes ship by push; the infrastructure underneath stays put.
 
 Run `m4-serverless-checklist` for the full sweep. **The EC2 is still `stopped` (your fallback) at the end of this skill — the checklist terminates it for you once the end-to-end test passes.**
 
@@ -356,7 +373,7 @@ Re-enable the rule only after stopping the EC2 distributor again. **One distribu
 ## Future enhancements (v2 roadmap)
 
 - **CDK / IaC.** M4 is provisioned imperatively via `call_aws` so the student sees each piece. Today the repo is CodeBuild's *build source* for the worker image, but the AWS resources (CodeBuild project, ECR, ECS, Lambda, EventBridge, IAM) are created by hand. Capture them in CDK so the whole stack is `cdk deploy`-able and the repo becomes the full deploy source, not just the image source.
-- **CodeBuild on push (CI).** Add a GitHub webhook / `start-build` trigger so pushing worker changes auto-rebuilds the image — turning the manual `start-build` into a pipeline.
+- **Auto-rollout to running tasks.** Push-to-build is already on (the CodeBuild webhook rebuilds `:latest` on every worker push). The next step is auto-*rollout*: have the new image picked up without waiting for the next natural Fargate task — e.g. a post-build hook that forces-new any in-flight service, or versioned image tags + a task-def update. (M4 today relies on the next job's task pulling `:latest`.)
 - **Dev + prod stacks.** Two distributors + clusters, same code, different env vars, one per Supabase/stage.
 - **Lambda-only tier for short videos.** For a cheaper tier that skips Fargate entirely, a single worker Lambda can transcribe short clips directly (accepting the 15-min cap with a clear error on long videos). Useful as a low-end option; Fargate remains the any-length path.
 - **Terminate the EC2 + clean up** its KeyPair/SG if you only stopped it.

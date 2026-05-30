@@ -14,7 +14,7 @@ By the end of this skill the student has:
 1. Confirmed all **4 Cowork connectors** (Supabase, Vercel, AWS, Stripe) are still authenticated and returning data.
 2. Confirmed **M1's EC2 worker actually works** — M4 moves the *same* worker pipeline into a Fargate container. If M1 never ran a job successfully, there's nothing to migrate; fix M1 first.
 3. Confirmed the AWS IAM user can reach **ECR / ECS / Lambda / EventBridge / CodeBuild** (not just EC2 from M1).
-4. **Resolved GitHub auth** for both the push (the **required build source** CodeBuild checks out — not optional) and the CodeBuild source connection — derived their own repo URL, and worked out the public/private path.
+4. **Resolved GitHub auth** for both the push (the **required build source** CodeBuild checks out — not optional) and the CodeBuild→GitHub connection (`import-source-credentials` with a **`repo` + `admin:repo_hook`** PAT, **mandatory even for public repos** because the push webhook needs it) — and derived their own repo URL.
 5. Understood the M4 **cost model** ($0 at idle, pay-per-job).
 
 **Why no EC2 anywhere:** M4's whole point is to remove the always-on EC2. So the worker image is **not** built on the EC2 (that would make the new system depend on the box it replaces) — it's built by **CodeBuild**, on demand, in the cloud. The student needs **no local Docker** and the EC2 can be terminated at the end.
@@ -110,11 +110,12 @@ Two distinct GitHub touchpoints — keep them straight:
    - **CLI mode (laptop):** the M0 `gh auth login` credential (keychain) already exists — a plain `git push` works, no token paste.
    - **Always derive the repo URL, never hardcode it** (`git -C <repo> remote get-url origin`) — each student's repo differs.
 
-2. **CodeBuild → repo (the build source):** CodeBuild reads the repo to run `docker build`.
-   - **Public repo** → CodeBuild needs nothing.
-   - **Private repo** → connect CodeBuild to GitHub **once**: `call_aws codebuild import-source-credentials --token <PAT> --server-type GITHUB --auth-type PERSONAL_ACCESS_TOKEN` (PAT needs `repo` scope; stored in CodeBuild, used only at build time). This is per-AWS-account, not per-build.
+2. **CodeBuild → repo (build source + push webhook):** CodeBuild reads the repo to run `docker build`, **and** registers a webhook so a `git push` triggers the build (M4's deploy mechanism for worker code). Connecting CodeBuild to GitHub is therefore **mandatory regardless of repo visibility** — even a public repo needs it, because *registering the webhook* requires repo-admin access:
+   - Run **once per AWS account**: `call_aws codebuild import-source-credentials --token <PAT> --server-type GITHUB --auth-type PERSONAL_ACCESS_TOKEN`.
+   - The PAT needs **`repo` + `admin:repo_hook`** scope — `repo` to read source, `admin:repo_hook` to register the push webhook. A `repo`-only token builds but **cannot create the webhook**, so push-to-build silently won't arm.
+   - Stored in CodeBuild; used at build time + to manage the webhook. Treat as a secret; revoke at course end.
 
-> **Is the repo public or private?** Resolve now — it decides whether CodeBuild needs the import-source-credentials step. (The Fargate worker pulls its image from **ECR**, not GitHub, so the running worker never needs GitHub access.)
+> **No "public repo needs nothing" shortcut anymore.** An earlier design skipped CodeBuild auth for public repos — but the webhook (M4's whole point: push → build) requires it either way, so resolve the PAT regardless. Note this PAT (`admin:repo_hook`) is for **CodeBuild→GitHub**; it's separate from the push PAT in item 1 (Cowork → GitHub). A student may use one token with both scopes for both jobs, or two scoped tokens. (The *running* Fargate worker pulls its image from **ECR**, not GitHub — only the build touches GitHub.)
 
 ## Section 5 — Cost-model awareness
 
@@ -132,7 +133,7 @@ Two distinct GitHub touchpoints — keep them straight:
 1. ✅ All 4 Cowork connectors authenticated (Section 1).
 2. ✅ M1 has completed at least one real job (Section 2).
 3. ✅ IAM user can reach ECR / ECS / Lambda / EventBridge / CodeBuild (Section 3).
-4. ✅ GitHub auth resolved: repo URL derived (not hardcoded); push path known (Cowork PAT / laptop gh); CodeBuild source path known (public→nothing / private→import-source-credentials) (Section 4a).
+4. ✅ GitHub auth resolved: repo URL derived (not hardcoded); push path known (Cowork PAT / laptop gh); CodeBuild→GitHub connection planned via `import-source-credentials` with a `repo` + `admin:repo_hook` PAT — **mandatory for any repo** (the push webhook needs it), no public-repo shortcut (Section 4a).
 5. ✅ Student understands the cost model (Section 5).
 
 If any fail, fix here.

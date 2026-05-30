@@ -1,6 +1,6 @@
 ---
 name: m4-serverless-checklist
-description: Course 2 Milestone 4 verification (Lambda distributor + Fargate worker, image built by CodeBuild, no EC2 dependency) — checks every artifact is real and correctly wired: the `fargate_task_arn` idempotency column, the CodeBuild project + a SUCCEEDED build, the worker image in ECR, the ECS cluster + task definition + IAM roles, the Lambda distributor + deps layer, the EventBridge rule, the M1 EC2 stopped with nothing depending on it, and a real job running end-to-end on Fargate. Then, ONLY if everything (including the end-to-end test) passes, it terminates the M1 EC2 for the student via call_aws so they never touch the AWS console. Guards the "one distributor per Supabase" rule. Use when the student says "驗收 M4", "check M4", "M4 done?", or after the `m4-serverless` skill completes Step 8.
+description: Course 2 Milestone 4 verification (Lambda distributor + Fargate worker, image built by CodeBuild + auto-rebuilt on git push, no EC2 dependency) — checks every artifact is real and correctly wired: the `fargate_task_arn` idempotency column, the CodeBuild project + a SUCCEEDED build + the push-to-build webhook, the worker image in ECR, the ECS cluster + task definition + IAM roles, the Lambda distributor + deps layer, the EventBridge rule, the M1 EC2 stopped with nothing depending on it, and a real job running end-to-end on Fargate. Then, ONLY if everything (including the end-to-end test) passes, it terminates the M1 EC2 for the student via call_aws so they never touch the AWS console. Guards the "one distributor per Supabase" rule. Use when the student says "驗收 M4", "check M4", "M4 done?", or after the `m4-serverless` skill completes Step 8.
 ---
 
 # M4 — Serverless Scaling Checklist (Lambda + Fargate, CodeBuild)
@@ -58,16 +58,18 @@ Invoked directly by the student (`驗收 M4`). You (Claude) **actively execute**
 | A1 | `job_sessions.fargate_task_arn` column exists | `SELECT column_name FROM information_schema.columns WHERE table_name='job_sessions' AND column_name='fargate_task_arn'` — one row. |
 | A2 | Added via a migration file | `mcp__supabase_remote__list_migrations` (or `supabase/migrations/`) — a migration mentioning `fargate_task_arn` exists. Raw-SQL changes violate [[supabase-best-practice]]. |
 
-### Section B — CodeBuild image build (4 checks)
+### Section B — CodeBuild image build + push trigger (5 checks)
 
 | # | Check | How to verify |
 |---|---|---|
 | B1 | CodeBuild project exists, GitHub source, privileged | `call_aws codebuild batch-get-projects --names <project>` — `source.type=GITHUB` with the student's repo URL, `environment.privilegedMode=true` (required for `docker build`), `ECR_URI` env var set. |
-| B2 | The latest build SUCCEEDED | `call_aws codebuild list-builds-for-project --project-name <project>` → newest id → `call_aws codebuild batch-get-builds --ids <id>` → `buildStatus: SUCCEEDED`. A FAILED/absent build = no image was produced. |
+| B2 | The latest build SUCCEEDED | `call_aws codebuild list-builds-for-project --project-name <project>` → newest id → `call_aws codebuild batch-get-builds --ids <id>` → `buildStatus: SUCCEEDED`. A FAILED/absent build = no image was produced. (May be the manual verify-build from Step 3e or a later webhook-triggered build — either is fine.) |
 | B3 | Worker image exists in ECR with `latest` | `call_aws ecr list-images --repository-name <repo>` — includes a `latest` tag, pushed at/after B2's build time. |
-| B4 | The build did NOT run on the EC2 | Confirm the image came from CodeBuild, not a leftover EC2 build: B2 SUCCEEDED is the positive proof. (Sanity: the EC2 has no ECR-push role and is stopped/terminated per Section F — so it *couldn't* have built it.) |
+| B4 | **Push-to-build webhook is registered** | Same `batch-get-projects` response → a `webhook` block with a `url` and a `filterGroups` entry matching `EVENT=PUSH` on `^refs/heads/main$`. This is M4's deploy trigger for worker code; without it, "edit + push" won't rebuild. |
+| B5 | The build did NOT run on the EC2 | Confirm the image came from CodeBuild, not a leftover EC2 build: B2 SUCCEEDED is the positive proof. (Sanity: the EC2 has no ECR-push role and is stopped per Section F — so it *couldn't* have built it.) |
 
-If B2 is FAILED: read the project's CloudWatch log group. Usual causes: missing `privilegedMode`, CodeBuild role lacks ECR push, `buildspec.yml` path wrong, or (private repo) `import-source-credentials` never run.
+If B2 is FAILED: read the project's CloudWatch log group. Usual causes: missing `privilegedMode`, CodeBuild role lacks ECR push, `buildspec.yml` path wrong, or the GitHub PAT (`import-source-credentials`) is missing/under-scoped.
+If B4 has no webhook: `import-source-credentials` was never run, or its PAT lacked **`admin:repo_hook`** scope (a `repo`-only token builds but can't register the webhook). Re-import with the right scope, then `call_aws codebuild create-webhook` per `m4-serverless` Step 3f.
 
 ### Section C — ECS + IAM compute lane (5 checks)
 
@@ -123,7 +125,7 @@ If F1 is `running` and the rule is ENABLED: **stop now** — double-billing. Sto
 | G1 | Web app + M2 credits still work | `mcp__vercel__list_deployments` shows a READY prod deploy; `/credits` loads; `credit_products` has its active rows. |
 | G2 | No secrets in git | `git log -p --all -S 'SUPABASE_SERVICE_KEY' | head` / `... -S 'sk-' | head` — none. M4 creds live in Lambda env / RunTask overrides / CodeBuild env, never the repo. |
 | G3 | M4 build source + handler are in the repo | `git -C <repo> ls-files | grep -E 'worker/Dockerfile|buildspec.yml|worker/lambda_distributor.py'` — all present. `worker/Dockerfile` + `buildspec.yml` are **CodeBuild's required source** (B2 couldn't have SUCCEEDED without them on the built branch); `lambda_distributor.py` is record-only. If B2 passed but these are missing locally, the student built from an un-pushed branch — reconcile. |
-| G4 | CodeBuild PAT (if used) is scoped + noted for cleanup | If a private-repo PAT was imported (`import-source-credentials`), remind the student it's stored in CodeBuild and should be a repo-scoped token they revoke at course end. |
+| G4 | CodeBuild PAT is scoped right + noted for cleanup | A PAT was imported via `import-source-credentials` (mandatory for the webhook, any repo). Confirm it has **`repo` + `admin:repo_hook`** scope (B4 webhook present is the proof it could register), remind the student it's stored in CodeBuild, and that it should be a repo-scoped token they revoke at course end. |
 
 ---
 
@@ -136,7 +138,7 @@ If A1–G4 all pass — **including the real end-to-end Fargate job in Section E
 If anything failed:
 
 - **Schema (A)** → `m4-serverless` Step 1
-- **CodeBuild / image (B)** → Steps 2–3 (push + buildspec + project + privilegedMode + ECR perms)
+- **CodeBuild / image / webhook (B)** → Steps 2–3 (push + buildspec + project + privilegedMode + ECR perms + `import-source-credentials` + `create-webhook`)
 - **ECS / IAM (C)** → Step 4
 - **Lambda / EventBridge (D)** → Steps 5–6
 - **End-to-end (E)** → trace B (image) → C (roles) → D (Lambda) → worker logs
