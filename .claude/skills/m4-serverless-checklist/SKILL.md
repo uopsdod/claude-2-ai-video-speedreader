@@ -1,6 +1,6 @@
 ---
 name: m4-serverless-checklist
-description: Course 2 Milestone 4 verification (Lambda distributor + Fargate worker, image built by CodeBuild, no EC2 dependency) — checks every artifact is real and correctly wired: the `fargate_task_arn` idempotency column, the CodeBuild project + a SUCCEEDED build, the worker image in ECR, the ECS cluster + task definition + IAM roles, the Lambda distributor + deps layer, the EventBridge rule, the M1 EC2 stopped/terminated with nothing depending on it, and a real job running end-to-end on Fargate. Guards the "one distributor per Supabase" rule. Use when the student says "驗收 M4", "check M4", "M4 done?", or after the `m4-serverless` skill completes Step 8.
+description: Course 2 Milestone 4 verification (Lambda distributor + Fargate worker, image built by CodeBuild, no EC2 dependency) — checks every artifact is real and correctly wired: the `fargate_task_arn` idempotency column, the CodeBuild project + a SUCCEEDED build, the worker image in ECR, the ECS cluster + task definition + IAM roles, the Lambda distributor + deps layer, the EventBridge rule, the M1 EC2 stopped with nothing depending on it, and a real job running end-to-end on Fargate. Then, ONLY if everything (including the end-to-end test) passes, it terminates the M1 EC2 for the student via call_aws so they never touch the AWS console. Guards the "one distributor per Supabase" rule. Use when the student says "驗收 M4", "check M4", "M4 done?", or after the `m4-serverless` skill completes Step 8.
 ---
 
 # M4 — Serverless Scaling Checklist (Lambda + Fargate, CodeBuild)
@@ -8,6 +8,8 @@ description: Course 2 Milestone 4 verification (Lambda distributor + Fargate wor
 ## What this skill does
 
 Verifies the student actually completed M4 — and, critically, that **nothing in the live system still depends on the EC2**. M4 failures are sneaky: the CodeBuild build silently fails (no image), the image is wrong, both distributors run and double-bill, or the EC2 "looks" gone but the distributor process is still alive. This checklist tests every layer from the schema column through to a real job completing on Fargate, with the EC2 confirmed out of the loop.
+
+**Then it finishes the job for the student.** Once everything passes — including a real end-to-end job on Fargate — **Section H terminates the now-unneeded EC2 directly via `call_aws`**, so the student never has to open the AWS console to decommission it. (If anything is red, the EC2 stays `stopped` as a fallback until it's fixed.)
 
 **The invariant this checklist protects above all else:** exactly **one** distributor polls a given Supabase. If both the M1 EC2 `distributor.py` and the M4 Lambda are live, every pending job gets spawned twice (double Whisper billing). Section F gates on this.
 
@@ -108,7 +110,7 @@ If D5 has no recent invocations but D4 is ENABLED: confirm `lambda add-permissio
 
 | # | Check | How to verify |
 |---|---|---|
-| F1 | M1 EC2 is `stopped` or `terminated` | `call_aws ec2 describe-instances --instance-ids <id> --query 'Reservations[].Instances[].State.Name'` — `stopped` (kept as fallback) or `terminated` (intended end state). `running` → see F2. |
+| F1 | M1 EC2 is `stopped` (or already `terminated` on a re-run) | `call_aws ec2 describe-instances --instance-ids <id> --query 'Reservations[].Instances[].State.Name'` — expected `stopped` at this point (Section H terminates it *after* the verdict). `terminated` is also fine (means H already ran on a prior pass). `running` → see F2. |
 | F2 | No `distributor.py` alive (only relevant if `running`) | If `stopped`/`terminated`, satisfied. If `running`: `call_aws ssm send-command --instance-ids <id> --document-name AWS-RunShellScript --parameters 'commands=["pgrep -fa distributor.py || echo NONE"]'` — must print `NONE`. A live `distributor.py` + ENABLED rule (D4) = double-spawn. |
 | F3 | Exactly one distributor enabled | EventBridge rule ENABLED (D4) **XOR** EC2 distributor running (F1/F2). Steady-state serverless: rule ENABLED + EC2 stopped/terminated. **Never both.** |
 
@@ -127,7 +129,9 @@ If F1 is `running` and the rule is ENABLED: **stop now** — double-billing. Sto
 
 ## Verdict
 
-If A1–F3 all pass: **M4 is complete, with no EC2 dependency.** The worker image is built on demand by **CodeBuild** from the GitHub repo, runs as isolated **Fargate** tasks (any video length), launched by a **Lambda** distributor on an **EventBridge** schedule. The M1 EC2 is stopped or terminated and **nothing depends on it** — build, run, and loop all moved to serverless services. Cost scales to ~$0 when idle. Nothing about the web app, database, payments, or domain changed.
+If A1–G4 all pass — **including the real end-to-end Fargate job in Section E** — **M4 is complete, with no EC2 dependency.** The worker image is built on demand by **CodeBuild** from the GitHub repo, runs as isolated **Fargate** tasks (any video length), launched by a **Lambda** distributor on an **EventBridge** schedule. Build, run, and loop have all moved to serverless services. Cost scales to ~$0 when idle. Nothing about the web app, database, payments, or domain changed.
+
+**→ When (and only when) everything above is green, run Section H to decommission the EC2 for the student.**
 
 If anything failed:
 
@@ -140,6 +144,29 @@ If anything failed:
 - **Regression (G)** → the relevant earlier-milestone checklist
 
 Re-run after every fix until green.
+
+## Section H — Decommission the EC2 (run ONLY after the verdict is green)
+
+The EC2 was kept `stopped` as a fallback while serverless was unproven. Now that A1–G4 pass — the real end-to-end job in Section E ran on Fargate, and Section F confirmed nothing depends on the EC2 — **terminate it for the student via `call_aws`, so they never have to open the AWS console.**
+
+> **Gate — do not skip.** Only proceed if **every check above passed, including E1–E4 (a real job reached `done` on Fargate)**. If anything is red — especially the end-to-end test — **leave the EC2 `stopped`** and fix the failure first. Terminating before serverless is proven would remove the only fallback.
+
+**H1 — Confirm the safe state one more time** (belt-and-suspenders before an irreversible action):
+- Section F passed: rule `ENABLED`, EC2 `stopped`, exactly one distributor.
+- Section E passed: a real job reached `done` on Fargate.
+
+**H2 — Terminate the instance for the student:**
+```
+call_aws ec2 terminate-instances --instance-ids <id>
+call_aws ec2 describe-instances --instance-ids <id> --query 'Reservations[].Instances[].State.Name'   # → shutting-down, then terminated
+```
+Tell the student: 「M4 全部驗收通過、真實 job 已經在 Fargate 上跑完，serverless 確定穩定了 — 我已經直接幫你把舊的 EC2 worker **terminate** 掉（不用你進 AWS console）。從現在起 build 在 CodeBuild、run 在 Fargate、排程在 Lambda，閒置成本趨近 $0。」
+
+> **Termination is irreversible** (the instance + its instance-store data are gone; the EBS root volume is deleted unless the student changed the default). That's the intended end state — but if the student explicitly says they want to keep the fallback a while longer, **respect that and leave it `stopped`** instead; note that a stopped instance still incurs a small EBS charge.
+
+**H3 — (optional) Mention leftover cleanup:** the EC2's KeyPair and security group (from M1 CDK/setup) are now unused. Removing them is harmless tidy-up but not required; flag it as a v2 cleanup rather than doing it automatically.
+
+After H2, the EC2 is gone and M4 is fully done — purely serverless, no console visits required of the student.
 
 ## Related skills
 

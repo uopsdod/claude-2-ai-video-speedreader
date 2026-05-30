@@ -15,7 +15,7 @@ Walks the student through Course 2 Milestone 4 end-to-end. By the end the studen
 2. An **ECS Fargate** cluster + task definition that runs one container per job — isolated CPU/memory, no contention, **no 15-minute limit** (handles any video length).
 3. A **Lambda distributor** that polls Supabase for pending jobs and calls `ecs:RunTask` per job — replacing M1's `distributor.py`.
 4. An **EventBridge schedule** (`rate(1 minute)`) firing the Lambda — replacing the always-on EC2 + `tmux` loop.
-5. The M1 **EC2 worker terminated (or stopped)** — and, crucially, **nothing depends on it anymore**: the build runs on CodeBuild, the work runs on Fargate, the loop runs on Lambda.
+5. The M1 **EC2 worker stopped** (this skill stops it; `m4-serverless-checklist` terminates it for the student once the end-to-end test passes) — and, crucially, **nothing depends on it anymore**: the build runs on CodeBuild, the work runs on Fargate, the loop runs on Lambda.
 
 **Why this shape.** The worker shells out to the **ffmpeg binary** (download → transcode → chunk → Whisper) and pulls heavy deps (`yt-dlp`, `moviepy`, `pydub`, …). That's a poor fit for a Lambda (15-min cap, no ffmpeg, `/tmp` limits) but a perfect fit for a **container on Fargate** — ffmpeg + every dep just bake into the image, and a long video has no time ceiling. The **distributor**, by contrast, only polls a table and fires `RunTask` — tiny, fast, every minute — which is the ideal **Lambda + EventBridge** job. So M4 splits M1's EC2 into the two serverless services each half fits best. (This is also exactly what the production stack runs.)
 
@@ -121,7 +121,7 @@ RUN-TIME (every job):
 | **IAM** | Task exec role, worker task role, Lambda role, **CodeBuild role** | `call_aws iam create-role` / `attach-role-policy` / `put-role-policy`. |
 | **Lambda** | Distributor + deps layer | `call_aws lambda create-function` / `publish-layer-version`. |
 | **EventBridge** | `rate(1 minute)` → Lambda | `call_aws events put-rule` / `put-targets`; `lambda add-permission`. |
-| **EC2 (M1)** | Stop or terminate the old worker | `call_aws ec2 stop-instances` / `terminate-instances`. Nothing depends on it after M4. |
+| **EC2 (M1)** | Stop the old worker (Step 7) — termination is done by the checklist once green | `call_aws ec2 stop-instances` here; `terminate-instances` runs in `m4-serverless-checklist` Section H. Nothing depends on it after M4. |
 
 ## Conversational flow
 
@@ -307,25 +307,26 @@ call_aws events put-targets --rule subtitle-distributor-schedule --targets 'Id=1
 
 **Order matters** — never run both distributors on one Supabase. Stop EC2 *first*.
 
-**7a. Stop the M1 EC2 distributor + the instance** (you can `terminate` now — nothing depends on it; or `stop` if you want a brief safety window). Via SSM, no SSH:
+**7a. Stop the M1 EC2 distributor + the instance — do this FOR the student, via `call_aws` (no AWS console).** We **stop** (not terminate) here on purpose: until the end-to-end test in `m4-serverless-checklist` passes, the EC2 is the safety fallback. The checklist **terminates it for the student once everything is green** — so the student never opens the EC2 console. Kill the distributor process via SSM (no SSH), then stop the instance:
 ```
 call_aws ssm send-command --instance-ids <id> --document-name "AWS-RunShellScript" --parameters 'commands=["tmux kill-session -t worker || pkill -f distributor.py || true"]'
-call_aws ec2 stop-instances --instance-ids <id>     # or terminate-instances once you're confident
+call_aws ec2 stop-instances --instance-ids <id>
 ```
+Tell the student: 「我已經幫你把 EC2 worker 停掉了（stop，不是 terminate）。先留著當保險，等 `驗收 M4` 全綠之後我會直接幫你把它 terminate 掉，你不用進 AWS console。」
 
 **7b. Ensure the rule is ENABLED:** `call_aws events enable-rule --name subtitle-distributor-schedule`.
 
-**Verify:** EC2 `stopped`/`terminated`; rule `ENABLED` at `rate(1 minute)`; after ~2 min, CloudWatch `/aws/lambda/subtitle-distributor` shows it firing each minute.
+**Verify:** EC2 `stopped`; rule `ENABLED` at `rate(1 minute)`; after ~2 min, CloudWatch `/aws/lambda/subtitle-distributor` shows it firing each minute.
 
 ---
 
 ### Step 8 — End-to-end proof + redeploy loop
 
 1. Submit a real job on the product URL; within ~1 min the Lambda spawns a Fargate task and stamps `fargate_task_arn`; the next tick skips it (idempotency).
-2. Job advances `pending → … → done` on Fargate; logs in `/ecs/subtitle-worker`. EC2 is `stopped`/`terminated` throughout.
+2. Job advances `pending → … → done` on Fargate; logs in `/ecs/subtitle-worker`. The EC2 is `stopped` throughout (still there as a fallback, but unused).
 3. **Future worker changes** = edit `worker/`, `git push`, `call_aws codebuild start-build`, then either let new Fargate tasks pull `:latest` or force-new. **No EC2 ever re-enters the loop.**
 
-Run `m4-serverless-checklist` for the full sweep.
+Run `m4-serverless-checklist` for the full sweep. **The EC2 is still `stopped` (your fallback) at the end of this skill — the checklist terminates it for you once the end-to-end test passes.**
 
 ---
 
@@ -339,7 +340,7 @@ Run `m4-serverless-checklist` for the full sweep.
 | Concurrency | Bounded by EC2 size | Effectively unlimited |
 | Cost when idle | EC2 24/7 | ~$0 (scales to zero) |
 | Idempotency | In-memory `_spawned_jobs` | DB `job_sessions.fargate_task_arn` |
-| EC2 | Running | **Stopped or terminated — nothing depends on it** |
+| EC2 | Running | **Stopped after this skill; terminated by the checklist once green — nothing depends on it either way** |
 | Web / DB / Stripe / domain | — | **Unchanged** |
 
 ## Switching back to the EC2 fallback
