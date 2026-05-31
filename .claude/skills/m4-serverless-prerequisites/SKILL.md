@@ -123,10 +123,19 @@ Two distinct GitHub touchpoints — keep them straight:
 > - **EventBridge + Lambda distributor**：每分鐘觸發，量很小 — 約 **$1.50/月**（M1 的 always-on EC2 是 ~$15/月）。
 > - **Fargate**：只有真的在跑 job 時計費，1 vCPU / 2GB 約 **$0.05/小時**（一支 job 幾分鐘 → 幾分錢）。閒置 **$0**。
 > - **CodeBuild**：只有 build image 時計費，一次 build 幾分鐘、幾分錢；不 build 就 $0。每月免費額度通常就涵蓋了課程用量。
-> - **ECR**：存 image，每 GB ~$0.10/月，image 很小。
+> - **ECR**：存 image，每 GB ~$0.10/月；worker image 約 270 MB → 約 $0.03/月（小，但不是 0；明細見下方）。
 > - **重點**：沒流量時趨近 $0；有流量按用量付。對個人 SaaS 通常比 always-on EC2 便宜很多。
 >
 > EC2 在 M4 結束時可以直接 terminate（沒有東西再依賴它）— build 在 CodeBuild、run 在 Fargate、loop 在 Lambda。想保守一點就先 stop 幾週再 terminate。」
+
+> **閒置那 ~$0.06/月 到底是哪來的？** 上面的數字（Lambda、Fargate、EventBridge）涵蓋了主要支出，但學生帳單上「明明沒在跑卻還是收幾分錢」的那一小筆，是這幾條小項目加起來的，列出來免得學生看到帳單一頭霧水：
+> - **ECR image storage** — `$0.10/GB·月`。worker image 約 270 MB，所以一份大約 **$0.03/月**。
+> - **孤兒 ECR images（會慢慢累積）** — 每次 push 新的 `:latest`，舊的那層會變成 untagged 但**仍然占空間計費**。沒有 lifecycle policy 的話會越積越多。建議加一條「只保留最近 N 個 image」的 lifecycle policy（v2 cleanup），否則 storage 會隨著每次 build 緩慢爬升。
+> - **CloudWatch log ingestion** — `$0.50/GB`。Lambda 每分鐘一筆 log + Fargate 的 worker log，量很小但不是 0。
+> - **S3 artifact bucket** — 存 `deps-layer.zip` + `handler.zip`（Cowork 模式下還會放 CodeBuild courier 上傳的東西），幾 MB，幾乎可忽略。
+> - **Lambda layer storage** — 75 GB 以下**免費**，這個 layer 才幾 MB，所以 $0；列出來只是讓你知道它不收錢。
+>
+> 全部加起來大約就是那 **~$0.06/月** 的閒置費 — 課程規模下小到不用在意，但知道組成就不會被帳單嚇到。
 
 ## Sanity check at the end (final state)
 

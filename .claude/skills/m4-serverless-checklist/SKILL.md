@@ -63,7 +63,7 @@ Invoked directly by the student (`驗收 M4`). You (Claude) **actively execute**
 | # | Check | How to verify |
 |---|---|---|
 | B1 | CodeBuild project exists, GitHub source, privileged | `call_aws codebuild batch-get-projects --names <project>` — `source.type=GITHUB` with the student's repo URL, `environment.privilegedMode=true` (required for `docker build`), `ECR_URI` env var set. |
-| B2 | The latest build SUCCEEDED | `call_aws codebuild list-builds-for-project --project-name <project>` → newest id → `call_aws codebuild batch-get-builds --ids <id>` → `buildStatus: SUCCEEDED`. A FAILED/absent build = no image was produced. (May be the manual verify-build from Step 3e or a later webhook-triggered build — either is fine.) |
+| B2 | The latest build SUCCEEDED | `call_aws codebuild list-builds-for-project --project-name <project>` → newest id → `call_aws codebuild batch-get-builds --ids <id>` → `buildStatus: SUCCEEDED`. A FAILED/absent build = no image was produced. (May be the manual verify-build from Step 3e or a later webhook-triggered build — either is fine.) **Cowork caveat:** if the student used the CodeBuild-courier for the Lambda zips (Step 5c), the *newest* build may be a `--buildspec-override lambda-build.buildspec.yml` run that uploads zips and does **not** push the worker image. Pair B2 with B3 — the `latest` ECR image is the real proof an image build succeeded; don't accept a courier build as the image build. |
 | B3 | Worker image exists in ECR with `latest` | `call_aws ecr list-images --repository-name <repo>` — includes a `latest` tag, pushed at/after B2's build time. |
 | B4 | **Push-to-build webhook is registered** | Same `batch-get-projects` response → a `webhook` block with a `url` and a `filterGroups` entry matching `EVENT=PUSH` on `^refs/heads/main$`. This is M4's deploy trigger for worker code; without it, "edit + push" won't rebuild. |
 | B5 | The build did NOT run on the EC2 | Confirm the image came from CodeBuild, not a leftover EC2 build: B2 SUCCEEDED is the positive proof. (Sanity: the EC2 has no ECR-push role and is stopped per Section F — so it *couldn't* have built it.) |
@@ -89,7 +89,7 @@ If C2 image mismatch: the task def points at a stale tag — re-register pointin
 |---|---|---|
 | D1 | Lambda exists + Active | `call_aws lambda get-function --function-name <fn>` → `State: Active`, handler `lambda_distributor.handler`. |
 | D2 | Deps layer attached | Same response: `Layers` includes the `subtitle-distributor-deps` ARN. |
-| D3 | Env wired; forwards AI keys but doesn't call AI | `call_aws lambda get-function-configuration --function-name <fn> --query 'Environment.Variables'` — has `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, `ECS_CLUSTER`, `TASK_DEFINITION`, `SUBNETS`, and the `OPENAI_API_KEY`/`ANTHROPIC_API_KEY` it forwards to Fargate. (Distributor imports only boto3+supabase.) |
+| D3 | Env wired; forwards AI keys but doesn't call AI | `call_aws lambda get-function-configuration --function-name <fn> --query 'Environment.Variables'` — has `SUPABASE_URL`, `SUPABASE_SECRET_KEY`, `ECS_CLUSTER`, `TASK_DEFINITION`, `SUBNETS`, and the `OPENAI_API_KEY`/`ANTHROPIC_API_KEY` it forwards to Fargate. (Distributor imports only boto3+supabase.) **Use `SUPABASE_SECRET_KEY`** — matching `worker.py` / Vercel / Supabase's current publishable/secret naming. The older `SUPABASE_SERVICE_KEY` (service_role JWT) name is being phased out; if you see it, it's drift — reconcile so all surfaces use one name or the worker reads `None`. |
 | D4 | EventBridge rule ENABLED at `rate(1 minute)`, targets the Lambda | `call_aws events describe-rule --name <rule>` → `State: ENABLED`, `rate(1 minute)`; `list-targets-by-rule` → the Lambda ARN. |
 | D5 | Lambda is firing each minute | `call_aws logs describe-log-streams --log-group-name /aws/lambda/<fn> --order-by LastEventTime --descending --max-items 1` — latest event within ~2 min. |
 
@@ -105,6 +105,8 @@ If D5 has no recent invocations but D4 is ENABLED: confirm `lambda add-permissio
 | E4 | Job reached `done` with content | `SELECT status,(subtitle_txt_content IS NOT NULL) AS has_txt FROM job_sessions WHERE id=(SELECT current_session_id FROM jobs WHERE id='<E1 job>')` → `done`, `has_txt=true`. Pipeline runs intact in the container. |
 
 **Idempotency spot-check (recommended):** confirm the *next* tick did not spawn a second task for the same job — one task per job; the distributor log for the following minute shows it skipping the already-ARN'd session.
+
+> **First end-to-end test fails? Don't guess — work the triage table in [Appendix — common end-to-end failure modes](#appendix--common-end-to-end-failure-modes).** The first real Fargate task is where three setup bugs surface at once (log-group permission, worker Secrets-Manager hardcode, null session link), and they look alike from the outside. The appendix tells the three apart by their distinct symptoms. Also: if your test fails on a URL you picked, retry with the known-good baseline `https://dqwd87ogl0f9o.cloudfront.net/950371295/mp4/950371295_1920x1080.mp4?v=1716669006` (~2 min, ~3 credits) to rule out "the URL is the problem" before debugging infra.
 
 ### Section F — Single-distributor invariant + EC2 out of the loop (3 checks)
 
@@ -123,11 +125,26 @@ If F1 is `running` and the rule is ENABLED: **stop now** — double-billing. Sto
 | # | Check | How to verify |
 |---|---|---|
 | G1 | Web app + M2 credits still work | `mcp__vercel__list_deployments` shows a READY prod deploy; `/credits` loads; `credit_products` has its active rows. |
-| G2 | No secrets in git | `git log -p --all -S 'SUPABASE_SERVICE_KEY' | head` / `... -S 'sk-' | head` — none. M4 creds live in Lambda env / RunTask overrides / CodeBuild env, never the repo. |
-| G3 | M4 build source + handler are in the repo | `git -C <repo> ls-files | grep -E 'worker/Dockerfile|buildspec.yml|worker/lambda_distributor.py'` — all present. `worker/Dockerfile` + `buildspec.yml` are **CodeBuild's required source** (B2 couldn't have SUCCEEDED without them on the built branch); `lambda_distributor.py` is record-only. If B2 passed but these are missing locally, the student built from an un-pushed branch — reconcile. |
+| G2 | No secrets in git | Scan history for **every** credential format this stack can leak, not just the two legacy ones. One pass: `git log -p --all \| grep -nE 'sb_secret_\|sb_publishable_\|SUPABASE_SERVICE_KEY\|github_pat_\|ghp_\|AKIA\|ASIA\|sk-proj-\|sk-' \| head` — all should return nothing. The patterns cover: this project's actual Supabase keys (`sb_secret_`/`sb_publishable_`), the legacy `SUPABASE_SERVICE_KEY`, GitHub PATs (`github_pat_` fine-grained, `ghp_` classic), AWS access keys (`AKIA`) and STS session tokens (`ASIA`), and OpenAI keys (`sk-proj-` new, `sk-` old). M4 creds live in Lambda env / RunTask overrides / CodeBuild env, never the repo. (The old check only looked for `SUPABASE_SERVICE_KEY` + `sk-`, which misses the `sb_secret_` format this project uses, plus any AWS/GitHub leak.) |
+| G3 | M4 build source + handler are in the repo | `git -C <repo> ls-files | grep -E 'worker/Dockerfile|buildspec.yml|worker/lambda_distributor.py'` — all present. `worker/Dockerfile` + `buildspec.yml` are **CodeBuild's required source** (B2 couldn't have SUCCEEDED without them on the built branch); `lambda_distributor.py` is record-only. If the student used the **Cowork CodeBuild-courier** path for the Lambda zips (Step 5c), `lambda-build.buildspec.yml` should also be committed. If B2 passed but the build-critical files are missing locally, the student built from an un-pushed branch — reconcile. |
 | G4 | CodeBuild PAT is scoped right + noted for cleanup | A PAT was imported via `import-source-credentials` (mandatory for the webhook, any repo). Confirm it has **`repo` + `admin:repo_hook`** scope (B4 webhook present is the proof it could register), remind the student it's stored in CodeBuild, and that it should be a repo-scoped token they revoke at course end. |
 
 ---
+
+## Appendix — common end-to-end failure modes
+
+The first real Fargate task is where every "happy-path-only" setup bug shows up — and they're easy to confuse because they all present as "the task didn't transcribe." Three of them are *production-affecting* (they'd hit your very first real user); one only bites direct-INSERT test jobs. Match the symptom, apply the fix, re-run Section E.
+
+| Symptom (where you see it) | Root cause | Fix | Skill ref |
+|---|---|---|---|
+| Task never starts. `describe-tasks` shows `ResourceInitializationError: ... not authorized to perform: logs:CreateLogGroup on /ecs/subtitle-worker`. **No** worker log lines (the group was never created). | Task def used `awslogs-create-group=true`, but `AmazonECSTaskExecutionRolePolicy` grants only log **write**, not `logs:CreateLogGroup`. | Pre-create the group: `call_aws logs create-log-group --log-group-name /ecs/subtitle-worker` and drop `awslogs-create-group` from the task def. *(Or attach `CloudWatchLogsFullAccess` to the exec role.)* | `m4-serverless` Step 4c |
+| Container starts then **crashes on import**; CloudWatch shows a `secretsmanager`/`AccessDenied` or `GetSecretValue` traceback before any pipeline line. | M1's `worker.py` reads creds from Secrets Manager at import, but the minimal Fargate task role has no `secretsmanager:GetSecretValue` — creds actually arrive as **env vars**. | Env-first refactor of `_load_secrets()` (prefer env vars, fall back to Secrets Manager) — commit `7c19086`. *(Or grant the task role `secretsmanager:GetSecretValue`.)* | `m4-serverless` Step 2 |
+| Container starts, claims the job, then **dies immediately** at `update_session(...)` with a null/`NoneType` error on `current_session_id`. Production jobs work; only your direct-INSERT **test** job fails. | The Lambda's `_ensure_session` created a `job_sessions` row but never set `jobs.current_session_id` to point at it. `POST /api/jobs` sets it atomically, so real users dodge it. | Add the link after the session insert: `db.table("jobs").update({"current_session_id": row["id"]}).eq("id", job_id).execute()` — commit `f422557`. | `m4-serverless` Step 5b |
+| `describe-tasks` shows `CannotPullContainerError`. | Exec role can't pull from ECR, or the task-def image tag is stale/absent. | Check C2 (image tag) + C3 (exec role has `AmazonECSTaskExecutionRolePolicy`); confirm B3 (a `latest` image exists). | Steps 3–4 |
+| Task runs but the job stays `pending` and **no** task ever spawns. | Lambda not firing, or no pending job matches `fargate_task_arn IS NULL`. | Work Section D (D4 rule ENABLED, D5 firing, D3 env). | Steps 5–6 |
+| Job hangs `pending` with credits at issue. | Not an M4 bug — the user has insufficient credits. | Top up credits; retry. | — |
+
+If the symptom doesn't match any row, fall back to the layer-by-layer trace in the Verdict's "If anything failed" list: image (B) → roles (C) → Lambda (D) → worker logs (E3).
 
 ## Verdict
 

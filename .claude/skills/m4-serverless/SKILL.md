@@ -121,7 +121,7 @@ RUN-TIME (every job):
 | **ECR** | Hold the worker image | `call_aws ecr create-repository`; CodeBuild pushes. |
 | **ECS** | Cluster + task definition | `call_aws ecs create-cluster` / `register-task-definition`. |
 | **IAM** | Task exec role, worker task role, Lambda role, **CodeBuild role** | `call_aws iam create-role` / `attach-role-policy` / `put-role-policy`. |
-| **Lambda** | Distributor + deps layer | `call_aws lambda create-function` / `publish-layer-version`. |
+| **Lambda** | Distributor + deps layer | `call_aws lambda create-function` / `publish-layer-version`. **Cowork can't `s3 cp` the zips** (sandbox is proxy-blocked from S3 + the AWS MCP has a separate filesystem) — use CodeBuild as the courier (Step 5c). CLI mode uploads directly. |
 | **EventBridge** | `rate(1 minute)` → Lambda | `call_aws events put-rule` / `put-targets`; `lambda add-permission`. |
 | **EC2 (M1)** | Stop the old worker (Step 7) — termination is done by the checklist once green | `call_aws ec2 stop-instances` here; `terminate-instances` runs in `m4-serverless-checklist` Section H. Nothing depends on it after M4. |
 
@@ -153,6 +153,22 @@ Apply — **Cowork:** `mcp__supabase_remote__apply_migration`; **CLI:** file + `
 ### Step 2 — Add the worker `Dockerfile` + `buildspec.yml` and push to GitHub
 
 The worker image needs the M1 `worker.py` pipeline + ffmpeg + deps. CodeBuild builds it from these two files in the repo.
+
+> **⚠️ Before you bake it in: M1's `worker.py` reads its three Supabase/OpenAI/Anthropic creds from AWS Secrets Manager at import time** (`sm.get_secret_value(...)` on an EC2 instance profile). In M4 those creds arrive as **env vars** via the Lambda's `containerOverrides[].environment` — and the Fargate **worker task role is intentionally minimal** (Step 4b: no `secretsmanager:GetSecretValue`). So the unmodified M1 worker **crashes on import in Fargate** even though the secrets exist in the account. **Pick one before building the image:**
+>
+> - **(Recommended) Env-first refactor.** Make `_load_secrets()` prefer env vars when all three are present, falling back to Secrets Manager otherwise. The *same* image then runs in both M1 (EC2 instance profile + Secrets Manager) and M4 (Fargate + env). Sketch:
+>   ```python
+>   def _load_secrets():
+>       keys = ("SUPABASE_URL", "SUPABASE_SECRET_KEY", "OPENAI_API_KEY")
+>       if all(os.environ.get(k) for k in keys):          # M4 / Fargate: env-injected
+>           return {k: os.environ[k] for k in keys}
+>       sm = boto3.client("secretsmanager")               # M1 / EC2: Secrets Manager
+>       return {... sm.get_secret_value(...) ...}
+>   ```
+>   (Real implementation committed as `7c19086`.)
+> - **(Alternative) Grant the task role `secretsmanager:GetSecretValue`** in Step 4b and keep `worker.py` as-is. Simpler diff, but the task role is no longer minimal and the image still hard-depends on Secrets Manager.
+>
+> Either is fine — but the skill must pick one. Default to the env-first refactor (keeps the task role minimal and the image portable). **Do this refactor before you push in 2c**, or the first Fargate task fails on import.
 
 **2a. `worker/Dockerfile`** (ffmpeg baked in — the worker shells out to it):
 ```dockerfile
@@ -213,6 +229,11 @@ call_aws iam create-role --role-name subtitleCodeBuildRole \
 call_aws iam attach-role-policy --role-name subtitleCodeBuildRole --policy-arn arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryPowerUser
 call_aws iam attach-role-policy --role-name subtitleCodeBuildRole --policy-arn arn:aws:iam::aws:policy/CloudWatchLogsFullAccess
 ```
+> **Cowork only:** Step 5c reuses this same role to have CodeBuild upload the Lambda layer/handler zips to S3 (the "CodeBuild as courier" pattern — the Cowork bash sandbox can't reach S3 itself). If you're in Cowork, also grant `s3:PutObject` on the artifacts bucket now so Step 5 doesn't stall:
+> ```
+> call_aws iam put-role-policy --role-name subtitleCodeBuildRole --policy-name CodeBuildS3Upload \
+>   --policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:PutObject","Resource":"arn:aws:s3:::<artifacts-bucket>/*"}]}'
+> ```
 
 **3c. Connect CodeBuild to GitHub (mandatory — the webhook needs it).** Import a GitHub PAT into CodeBuild once per AWS account. **This is required even for a public repo**, because registering a webhook needs repo-admin access — so the PAT must have **`repo` + `admin:repo_hook`** scope (not just `repo`):
 ```
@@ -230,6 +251,7 @@ call_aws codebuild create-project --name subtitle-worker-build \
   --service-role <subtitleCodeBuildRole ARN>
 ```
 > **`privilegedMode=true` is mandatory** — without it the build container can't run the Docker daemon and `docker build` fails. This is the CodeBuild equivalent of the arch/Docker traps in a local build.
+> **`--source-version` accepts both `main` and `refs/heads/main`** — they're equivalent. Don't be surprised when `batch-get-projects` reads the value back as `refs/heads/main` even though you passed `main`; it's the same ref, just normalized.
 
 **3e. Run ONE manual build and verify it** — *before* trusting the webhook. This proves the buildspec, role, and ECR wiring in isolation, so any setup error surfaces here rather than as a confusing webhook failure later. **You (Claude) run and verify this directly:**
 ```
@@ -256,53 +278,111 @@ call_aws codebuild create-webhook --project-name subtitle-worker-build \
 
 **4b. Two IAM roles:**
 - **Task execution role** — pull image from ECR + write logs. Attach `AmazonECSTaskExecutionRolePolicy`.
-- **Worker task role** — what the running worker needs (essentially nothing AWS-side; it talks to Supabase/OpenAI over HTTPS via env creds). Keep minimal, separate from exec role.
+- **Worker task role** — what the running worker needs (essentially nothing AWS-side; it talks to Supabase/OpenAI over HTTPS via env creds). Keep minimal, separate from exec role. **This is exactly why Step 2's env-first refactor matters:** a minimal task role has no `secretsmanager:GetSecretValue`, so an unrefactored M1 worker (which reads creds from Secrets Manager on import) crashes here. If you instead chose the "grant the task role Secrets Manager access" alternative from Step 2, attach a `secretsmanager:GetSecretValue` inline policy to *this* role — otherwise leave it minimal.
 ```
 call_aws iam create-role --role-name subtitleTaskExecutionRole --assume-role-policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ecs-tasks.amazonaws.com"},"Action":"sts:AssumeRole"}]}'
 call_aws iam attach-role-policy --role-name subtitleTaskExecutionRole --policy-arn arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
 call_aws iam create-role --role-name subtitleWorkerTaskRole --assume-role-policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ecs-tasks.amazonaws.com"},"Action":"sts:AssumeRole"}]}'
 ```
 
-**4c. Register the task definition:**
+**4c. Pre-create the CloudWatch log group** (do this **before** registering the task def):
+```
+call_aws logs create-log-group --log-group-name /ecs/subtitle-worker
+```
+> **Why this is mandatory, not optional.** The obvious shortcut is `"awslogs-create-group":"true"` in the task def — *let ECS make the group on first run*. But that requires the **execution role** to have `logs:CreateLogGroup`, and `AmazonECSTaskExecutionRolePolicy` (attached in 4b) grants only the log **write** side, **not** create. So with `create-group=true` and the managed policy alone, the **first Fargate task fails before the container even starts**:
+> ```
+> ResourceInitializationError: failed to validate logger args:
+> AccessDeniedException ... not authorized to perform: logs:CreateLogGroup
+> on resource: /ecs/subtitle-worker
+> ```
+> Pre-creating the group (one idempotent call — `ResourceAlreadyExistsException` is harmless) sidesteps this entirely. *(Alternative: attach `CloudWatchLogsFullAccess` to `subtitleTaskExecutionRole`. Pre-create is cleaner — it keeps the exec role minimal.)* Because we pre-create, the task def below **omits `awslogs-create-group`** rather than setting it `true`.
+
+**4d. Register the task definition** (note: **no `awslogs-create-group`** — the group already exists from 4c):
 ```
 call_aws ecs register-task-definition --family subtitle-worker \
   --requires-compatibilities FARGATE --network-mode awsvpc --cpu 1024 --memory 2048 \
   --execution-role-arn <subtitleTaskExecutionRole ARN> --task-role-arn <subtitleWorkerTaskRole ARN> \
   --container-definitions '[{"name":"worker","image":"<repositoryUri>:latest","essential":true,
-    "logConfiguration":{"logDriver":"awslogs","options":{"awslogs-group":"/ecs/subtitle-worker","awslogs-region":"<region>","awslogs-stream-prefix":"worker","awslogs-create-group":"true"}}}]'
+    "logConfiguration":{"logDriver":"awslogs","options":{"awslogs-group":"/ecs/subtitle-worker","awslogs-region":"<region>","awslogs-stream-prefix":"worker"}}}]'
 ```
 
 **Verify + optional one-shot sanity test** (prove image/roles/env before wiring the Lambda):
 ```
 call_aws ecs run-task --cluster subtitle-workers --task-definition subtitle-worker --launch-type FARGATE \
   --network-configuration 'awsvpcConfiguration={subnets=[<subnet>],assignPublicIp=ENABLED}' \
-  --overrides '{"containerOverrides":[{"name":"worker","environment":[{"name":"JOB_ID","value":"<a real pending job>"},{"name":"SUPABASE_URL","value":"..."},{"name":"SUPABASE_SERVICE_KEY","value":"..."},{"name":"OPENAI_API_KEY","value":"..."}]}]}'
+  --overrides '{"containerOverrides":[{"name":"worker","environment":[{"name":"JOB_ID","value":"<a real pending job>"},{"name":"SUPABASE_URL","value":"..."},{"name":"SUPABASE_SECRET_KEY","value":"..."},{"name":"OPENAI_API_KEY","value":"..."}]}]}'
 ```
-`assignPublicIp=ENABLED` on a public subnet so the task reaches the internet without a NAT gateway. Watch the job advance in Supabase + `/ecs/subtitle-worker` logs.
+`assignPublicIp=ENABLED` on a public subnet so the task reaches the internet without a NAT gateway. Watch the job advance in Supabase + `/ecs/subtitle-worker` logs (the group exists from 4c).
+
+> **Env-var naming:** use **`SUPABASE_SECRET_KEY`** throughout (matching `worker.py`, Vercel, and Supabase's current "publishable/secret" terminology). The older `SUPABASE_SERVICE_KEY` / "service_role JWT" naming is being phased out — don't mix the two or the worker reads `None`.
+
+> **Test-path trap (direct-INSERT jobs).** If you create a test job by inserting straight into `jobs` + `job_sessions` (instead of going through `POST /api/jobs`), make sure `jobs.current_session_id` actually points at the session row — see Step 5's `_ensure_session` note. A null `current_session_id` crashes `worker.py` at its first `update_session(...)`, which looks like an image/env failure but isn't.
 
 ---
 
 ### Step 5 — Build the Lambda distributor + its deps layer
 
-The Lambda replaces `distributor.py`: on each tick it (1) `SELECT`s pending jobs `WHERE fargate_task_arn IS NULL`, calls `ecs.run_task`, writes the ARN; (2) does stuck-job recovery (new session N+1); (3) daily storage cleanup (DB-timestamp gated). It imports **only** `boto3` + `supabase` — **no OpenAI/Anthropic** (it forwards those keys to the Fargate task via `containerOverrides[].environment`).
+The Lambda replaces `distributor.py`. **For M4 it does one thing: spawn pending jobs.** On each tick it `SELECT`s pending jobs `WHERE fargate_task_arn IS NULL`, ensures a session exists (and **links it**, see 5b), calls `ecs.run_task`, then writes the ARN. It imports **only** `boto3` + `supabase` — **no OpenAI/Anthropic** (it forwards those keys to the Fargate task via `containerOverrides[].environment`).
 
-> **The distributor's deps layer is tiny (`supabase` + `boto3`) — no Docker needed.** Build the small zip with `pip download --platform manylinux2014_x86_64 --only-binary=:all:` from the workspace (or any x86_64 pip), zip, and `publish-layer-version`. (CodeBuild handled the heavy worker image; the Lambda layer is light enough to need no container build.) Commit `worker/lambda_distributor.py` to the repo for the record.
+> **Scope note (M8 — what M4's Lambda does NOT do yet).** The production distributor has three passes: (1) spawn pending jobs, (2) stuck-job recovery (creates session N+1, nulls heavy content on the abandoned session), (3) daily DB-timestamp-gated storage cleanup. **M4 ships only pass (1).** Passes (2) and (3) are a **v2 roadmap** item — the precise "session N+1" semantics aren't trivial and aren't needed to prove the serverless loop end-to-end. Don't block M4 on them; build pass (1) cleanly and note (2)/(3) as future work. (If you later add recovery, the same `_ensure_session` linking rule in 5b applies to the new session.)
 
-**5a. Layer:**
+**5b. The handler — and the one link that's easy to miss (`_ensure_session`).** The naive spec is "find or create a `job_sessions` row, then `run_task`." Implemented literally, the Lambda **creates the session row but never sets `jobs.current_session_id` to point at it.** Production traffic dodges this because `POST /api/jobs` creates both rows atomically and sets the link — but **any direct-INSERT test job** (what you'll use to verify the pipeline structurally, see Step 4's test-path trap) then crashes `worker.py` at `update_session(...)` because `current_session_id` is null. So `_ensure_session` **must set the link after inserting:**
+```python
+def _ensure_session(db, job_id):
+    job = db.table("jobs").select("current_session_id").eq("id", job_id).single().execute().data
+    if job.get("current_session_id"):
+        return job["current_session_id"]                       # already linked — reuse
+    row = db.table("job_sessions").insert(
+        {"job_id": job_id, "session_number": 1}).execute().data[0]
+    db.table("jobs").update(                                   # ← the easy-to-miss link
+        {"current_session_id": row["id"]}).eq("id", job_id).execute()
+    return row["id"]
+```
+The `jobs.update(current_session_id=...)` line is the fix (committed as `f422557`). Without it the spawn "works" (a task launches) but the worker dies immediately on a null link. Spell this out — the trap is non-obvious.
+
+**5c. Deps layer.** The layer is tiny (`supabase` + `boto3`). But **getting the zip into S3 differs sharply by environment** — this is the step that silently assumes S3 reach:
+
+- **CLI mode (laptop):** straightforward. The laptop reaches S3 directly.
+  ```bash
+  pip download --platform manylinux2014_x86_64 --only-binary=:all: --target python supabase boto3
+  zip -r deps-layer.zip python && aws s3 cp deps-layer.zip s3://<bucket>/deps-layer.zip
+  ```
+- **Cowork mode — `aws s3 cp` from bash does NOT work, and there is no obvious workaround.** Two hard walls: (a) the **bash sandbox is proxy-blocked from S3** (`X-Proxy-Error: blocked-by-allowlist on s3.amazonaws.com` — pre-signed PUT URLs and raw `curl` hit the same proxy, so they don't escape either); (b) the **AWS API MCP runs in a separate sandbox** with its own workdir (`/tmp/aws-api-mcp/workdir`) — files you write from bash aren't visible to it. So you cannot build the zip in bash and upload it, and you cannot hand it to `call_aws`. **The only viable path in Cowork is to make CodeBuild the courier** — let the build container (which has full AWS reach) download the deps and `s3 cp` them up itself. Reuse the existing CodeBuild project with a `--buildspec-override` pointing at a small helper buildspec:
+  ```yaml
+  # lambda-build.buildspec.yml  — quote EVERY command (see the :all: YAML trap below)
+  version: 0.2
+  phases:
+    build:
+      commands:
+        - "pip download --platform manylinux2014_x86_64 --only-binary=:all: --target python supabase boto3"
+        - "zip -r deps-layer.zip python"
+        - "aws s3 cp deps-layer.zip s3://${ARTIFACTS_BUCKET}/deps-layer.zip"
+        - "zip handler.zip lambda_distributor.py && aws s3 cp handler.zip s3://${ARTIFACTS_BUCKET}/handler.zip"
+  ```
+  ```
+  call_aws codebuild start-build --project-name subtitle-worker-build \
+    --buildspec-override lambda-build.buildspec.yml \
+    --environment-variables-override 'name=ARTIFACTS_BUCKET,value=<bucket>,type=PLAINTEXT'
+  ```
+  This requires adding **`s3:PutObject`** (on the artifacts bucket) to `subtitleCodeBuildRole`. **Parameterize the bucket via `${ARTIFACTS_BUCKET}` — never hardcode it** (a hardcoded bucket breaks the moment you mirror to a second AWS account).
+  > **⚠️ YAML `:all:` trap (M5).** The pip flag `--only-binary=:all:` contains a `: ` (colon-space) sequence that YAML reads as a key/value separator — CodeBuild rejects the unquoted command with `YAML_FILE_ERROR: Expected Commands[1] to be of string type: found subkeys instead`. **Wrap every command line in double quotes** (as above) and it parses.
+
+Then publish the layer from the zip now sitting in S3:
 ```
 call_aws lambda publish-layer-version --layer-name subtitle-distributor-deps \
   --content S3Bucket=<bucket>,S3Key=deps-layer.zip --compatible-runtimes python3.12
 ```
+Commit `worker/lambda_distributor.py` and `lambda-build.buildspec.yml` to the repo for the record.
 
-**5b. Lambda execution role** — `ecs:RunTask`/`DescribeTasks`/`StopTask`, `iam:PassRole` scoped to the two task roles from Step 4, plus `AWSLambdaBasicExecutionRole`.
+**5d. Lambda execution role** — `ecs:RunTask`/`DescribeTasks`/`StopTask`, `iam:PassRole` scoped to the two task roles from Step 4, plus `AWSLambdaBasicExecutionRole`.
 
-**5c. Create the function** (stage the handler zip via S3 in Cowork):
+**5e. Create the function** (the handler zip is already in S3 from 5c in Cowork; from a laptop you can also `--zip-file fileb://handler.zip` directly):
 ```
 call_aws lambda create-function --function-name subtitle-distributor \
   --runtime python3.12 --handler lambda_distributor.handler --role <Lambda role ARN> \
   --layers <deps layer ARN> --timeout 300 --memory-size 256 \
   --code S3Bucket=<bucket>,S3Key=handler.zip \
-  --environment 'Variables={SUPABASE_URL=...,SUPABASE_SERVICE_KEY=...,OPENAI_API_KEY=...,ANTHROPIC_API_KEY=...,ECS_CLUSTER=subtitle-workers,TASK_DEFINITION=subtitle-worker,SUBNETS=<subnet>}'
+  --environment 'Variables={SUPABASE_URL=...,SUPABASE_SECRET_KEY=...,OPENAI_API_KEY=...,ANTHROPIC_API_KEY=...,ECS_CLUSTER=subtitle-workers,TASK_DEFINITION=subtitle-worker,SUBNETS=<subnet>}'
 ```
 
 **Verify:** `get-function` → `State: Active`. Manual one-shot `call_aws lambda invoke` → confirm in CloudWatch the spawn pass ran and (if a pending job exists) a Fargate task launched + ARN landed in `job_sessions.fargate_task_arn`.
@@ -340,6 +420,11 @@ Tell the student: 「我已經幫你把 EC2 worker 停掉了（stop，不是 ter
 ### Step 8 — End-to-end proof + redeploy loop
 
 1. Submit a real job on the product URL; within ~1 min the Lambda spawns a Fargate task and stamps `fargate_task_arn`; the next tick skips it (idempotency).
+   > **Recommended first test URL** (CloudFront, ~2 min clip, ~3 credits — a known-good baseline that rules out "the URL is the problem" before you debug M4 infra):
+   > ```
+   > https://dqwd87ogl0f9o.cloudfront.net/950371295/mp4/950371295_1920x1080.mp4?v=1716669006
+   > ```
+   > **Expected on success:** Fargate task `STOPPED` exit 0, ~3 min total; `jobs.status='done'`; `length(subtitle_txt_content) ≈ 2,200–2,400` chars (Whisper, language=zh); user balance debited 3 credits; one `credit_transactions` row with `amount=-3`. If your *first* test fails with a *different* URL, retry with this one to isolate "URL problem" from "M4 infra problem."
 2. Job advances `pending → … → done` on Fargate; logs in `/ecs/subtitle-worker`. The EC2 is `stopped` throughout (still there as a fallback, but unused).
 3. **Future worker changes are just a `git push`.** Edit `worker/`, `git push origin main` → the CodeBuild **webhook rebuilds + pushes `:latest` automatically** (no `start-build`); new Fargate tasks pull the new image (force-new if you want it immediately). **No EC2 ever re-enters the loop, and no manual build step.** This is the business-logic-rollout half of M4: code changes ship by push; the infrastructure underneath stays put.
 
@@ -374,7 +459,7 @@ Re-enable the rule only after stopping the EC2 distributor again. **One distribu
 
 - **CDK / IaC.** M4 is provisioned imperatively via `call_aws` so the student sees each piece. Today the repo is CodeBuild's *build source* for the worker image, but the AWS resources (CodeBuild project, ECR, ECS, Lambda, EventBridge, IAM) are created by hand. Capture them in CDK so the whole stack is `cdk deploy`-able and the repo becomes the full deploy source, not just the image source.
 - **Auto-rollout to running tasks.** Push-to-build is already on (the CodeBuild webhook rebuilds `:latest` on every worker push). The next step is auto-*rollout*: have the new image picked up without waiting for the next natural Fargate task — e.g. a post-build hook that forces-new any in-flight service, or versioned image tags + a task-def update. (M4 today relies on the next job's task pulling `:latest`.)
-- **Dev + prod stacks.** Two distributors + clusters, same code, different env vars, one per Supabase/stage.
+- **Dev + prod stacks (multi-account).** Two distributors + clusters, same code, different env vars, one per Supabase/stage. **If you provision M4 in a second AWS account** (dev→prod, or a wrong-account→correct-account migration): `import-source-credentials` is **per-account**, so re-import the same GitHub PAT into the new account's CodeBuild. Both accounts' webhooks then fire on every push to the shared repo (harmless but each incurs build minutes) — `call_aws codebuild delete-webhook` on the inactive account to silence it. And any helper buildspec (e.g. `lambda-build.buildspec.yml`) must take the artifacts bucket via `${ARTIFACTS_BUCKET}`, never a hardcoded name, or it breaks the moment you mirror accounts.
 - **Lambda-only tier for short videos.** For a cheaper tier that skips Fargate entirely, a single worker Lambda can transcribe short clips directly (accepting the 15-min cap with a clear error on long videos). Useful as a low-end option; Fargate remains the any-length path.
 - **Terminate the EC2 + clean up** its KeyPair/SG if you only stopped it.
 
