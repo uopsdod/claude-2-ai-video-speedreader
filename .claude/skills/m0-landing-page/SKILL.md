@@ -331,3 +331,4 @@ After M0 checklist passes, tell the student:
 - [ ] Verify the Vercel framework preset auto-detection actually works for Lovable's default Vite output
 - [ ] Add a fallback prompt for when Lovable's v1 output is visually broken (re-roll instructions)
 - [ ] Decide whether to demo Lovable's "Publish" button vs. forcing students through GitHub→Vercel (some students may push back wanting the easier path)
+- [ ] Consider extracting the Step 2 Lovable prompt into a standalone `prompt.md` so it can be diffed / versioned independently of the skill prose
