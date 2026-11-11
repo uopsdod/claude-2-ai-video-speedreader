@@ -1,13 +1,13 @@
 ---
 name: m1-ai-video-transcript-prerequisites
-description: One-time external-account + EC2 setup the student needs BEFORE starting M1 (Course 2 module 2.2 — 打造 AI 影片摘要核心功能). Adds OpenAI + AWS on top of M0's accounts, launches one t3.small Ubuntu EC2 entirely through MCP (Supabase + AWS API MCP) — no SSH, no key pair, no terminal. Access the EC2 via AWS Systems Manager (SSM) Session Manager. Use when the student says "M1 環境準備", "setup for M1", or when `m1-ai-video-transcript` / `m1-ai-video-transcript-checklist` detects a missing OpenAI key / EC2.
+description: One-time external-account + EC2 setup the student needs BEFORE starting M1 (Course 2 module 2.2 — 打造 AI 影片摘要核心功能). Adds OpenAI + AWS on top of M0's accounts, launches one t3.small Ubuntu EC2 entirely through MCP (Supabase + AWS MCP) — no SSH, no key pair, no terminal, no access keys. Access the EC2 via AWS Systems Manager (SSM). Use when the student says "M1 環境準備", "setup for M1", or when `m1-ai-video-transcript` / `m1-ai-video-transcript-checklist` detects a missing OpenAI key / EC2.
 ---
 
 # M1 Prerequisites — OpenAI + AWS EC2 (SSM-only)
 
 ## What this skill does
 
-Adds two accounts on top of M0's three (GitHub / Supabase / Vercel) and provisions one Ubuntu EC2 instance that runs the worker for the rest of M1. **No SSH. No key pair. No PEM file. Everything goes through MCP** — Supabase MCP for DB writes, AWS API MCP (`suggest_aws_commands` + `call_aws`) for EC2 lifecycle, AWS Systems Manager (SSM) for in-instance commands.
+Adds two accounts on top of M0's three (GitHub / Supabase / Vercel) and provisions one Ubuntu EC2 instance that runs the worker for the rest of M1. **No SSH. No key pair. No PEM file. No IAM access key. Everything goes through MCP** — Supabase MCP for DB writes, **AWS MCP** (`aws___run_script`, which runs Python `call_boto3(...)`) for IAM / EC2 / Secrets Manager / SSM, and AWS Systems Manager (SSM) for in-instance commands.
 
 | # | Service | Used for |
 |---|---|---|
@@ -17,13 +17,13 @@ Adds two accounts on top of M0's three (GitHub / Supabase / Vercel) and provisio
 By the end of this skill the student has:
 
 1. An OpenAI API key (`sk-...`) with at least \$5 of credit.
-2. An AWS account with **AWS API MCP** installed and authenticated in Cowork (or `aws` CLI authenticated, in CLI mode — but the SSM commands work identically either way).
-3. One running `t3.small` Ubuntu 22.04 EC2 instance, tagged `Name=m1-worker`, with an IAM instance profile that grants SSM Session Manager + SSM Run Command.
-4. `ffmpeg`, `python3.12`, `python3.12-venv`, `git` installed on the EC2 via `ssm send-command` (no SSH).
+2. An AWS account with **AWS MCP** connected in Cowork (OAuth sign-in, Section 2.0).
+3. One running `t3.small` Ubuntu 22.04 EC2 instance, tagged `Name=m1-worker`, with an IAM instance profile that grants SSM Run Command.
+4. `ffmpeg`, `python3.12`, `python3.12-venv`, `git` installed on the EC2 via SSM `SendCommand` (no SSH).
 5. The M0 GitHub repo cloned to `/home/ubuntu/app` on the EC2.
 6. A Python venv pre-created at `/home/ubuntu/app/worker/venv` ready for the M1 worker to install requirements into.
 
-**No port 22 is open. There is no SSH key.** Everything you do on the EC2 from now on goes through `call_aws ssm send-command` or `call_aws ssm start-session`.
+**No port 22 is open. There is no SSH key.** Everything you do on the EC2 from now on goes through SSM `SendCommand` (via `aws___run_script`).
 
 ## How M1 will deploy code to this EC2 (preview)
 
@@ -34,8 +34,8 @@ By the end of this skill the student has:
 This prereq builds the EC2; the **main M1 skill** writes the worker code and starts deploying to it. So you (or the student) understands what infrastructure to optimize for: the deploy model is **GitHub-pull + systemd**, no Docker, no CI, no SSH.
 
 - The M1 worker code lives in the **same GitHub repo as the M0 web app** — under a new `worker/` subdirectory the main skill creates in Step 5. (Vercel auto-deploys `app/` as before; it ignores `worker/`.)
-- Code reaches the EC2 by `git pull` *into* `/home/ubuntu/app` (which §2.7 below cloned). The pull is triggered through `call_aws ssm send-command` from Cowork — no `scp`, no `ssh`, no PEM file.
-- The distributor process runs as a **systemd service** (`m1-distributor.service`) installed by the main skill in Step 6. systemd handles auto-start on EC2 reboot + auto-restart on crash. Updates: pull → `pip install` → `systemctl restart m1-distributor.service`. All three steps go through `ssm send-command`.
+- Code reaches the EC2 by `git pull` *into* `/home/ubuntu/app` (which §2.7 below cloned). The pull is triggered through SSM `SendCommand` from Cowork — no `scp`, no `ssh`, no PEM file.
+- The distributor process runs as a **systemd service** (`m1-distributor.service`) installed by the main skill in Step 6. systemd handles auto-start on EC2 reboot + auto-restart on crash. Updates: pull → `pip install` → `systemctl restart m1-distributor.service`. All three steps go through SSM `SendCommand`.
 
 That means the EC2 you build here just needs: SSM agent reachable (handled by §2.2 IAM role), `git` + Python venv (handled by §2.6/§2.7), and read access to the four secrets in Secrets Manager (handled by §2.3). Nothing else. The main skill never has to install Docker, configure a CI runner, or open inbound ports.
 
@@ -44,11 +44,31 @@ That means the EC2 you build here just needs: SSM agent reachable (handled by §
 This skill assumes you have:
 
 - ✅ **Supabase MCP** (`mcp__supabase_remote__*`) — already installed for M0.
-- ✅ **AWS API MCP** (`call_aws`, `suggest_aws_commands`) — published by Amazon Web Services, available in the Cowork plugin/connector directory under "AWS API MCP Server". Install it via the Cowork connector directory, then authenticate it in **Section 2.0** below (you need an AWS account first — Section 2.1).
+- ✅ **AWS MCP** (official AWS-hosted MCP server, tools such as `aws___run_script`, `aws___get_presigned_url`, `aws___search_documentation`) — added as a custom connector and signed in with OAuth in **Section 2.0** below (you need an AWS account first — Section 2.1).
 
-If AWS API MCP isn't installed: pause this skill, install it in Cowork, then resume. The whole point of this path is to keep the student out of the AWS console and the terminal — without AWS API MCP, you're stuck doing AWS-console clicks manually.
+> **Do not keep the old "AWS API MCP" connector enabled.** It is a different server (tools `call_aws` / `suggest_aws_commands`) that authenticates with an access key. If it is installed, disable it in Customize → Connectors so Claude doesn't mix the two. Nothing in this skill uses it.
 
-> **Why no SSH?** SSH on EC2 is fine when you have a laptop + a `.pem` file + a stable IP. In Cowork there's no laptop filesystem to hold the PEM, and the network egress story is fiddly. AWS Systems Manager (SSM) gives us a better answer: the EC2 attaches to SSM via an IAM role; we send commands from Cowork via `call_aws ssm send-command` and open a shell (if needed) via `call_aws ssm start-session`. No inbound port. No key. Everything audited in CloudTrail. This is the same pattern the production worker in this repo uses (see `feedback_ec2_commands.md`).
+If AWS MCP isn't connected: pause this skill, finish Section 2.0, then resume. The whole point of this path is to keep the student out of the AWS console and the terminal — without AWS MCP, you're stuck doing AWS-console clicks manually.
+
+> **Why no SSH?** SSH on EC2 is fine when you have a laptop + a `.pem` file + a stable IP. In Cowork there's no laptop filesystem to hold the PEM, and the network egress story is fiddly. AWS Systems Manager (SSM) gives us a better answer: the EC2 attaches to SSM via an IAM role; we send commands from Cowork via SSM `SendCommand`. No inbound port. No key. Everything audited in CloudTrail. This is the same pattern the production worker in this repo uses (see `feedback_ec2_commands.md`).
+
+## How AWS commands are written in this skill
+
+AWS MCP's `aws___run_script` tool runs a short **Python script** in a sandbox. Inside it you call AWS APIs with:
+
+```python
+await call_boto3(service_name="<service>", operation_name="<PascalCaseOperation>", region_name="<region>", params={...})
+```
+
+Rules the snippets below follow (keep them if you edit them):
+
+- `operation_name` is the **PascalCase API operation** (`CreateRole`, `SendCommand`) — not the CLI spelling (`create-role`) and not the snake_case boto3 method.
+- Pass `region_name` explicitly on every regional service call (EC2, SSM, Secrets Manager). IAM is global and takes no region. Never rely on a default region.
+- JSON policy documents go in as **strings** (`json.dumps(...)`).
+- End the script with `result = {...}` then `result` on its own line, so the tool returns it.
+- Scripts must discover what they need themselves (instance ID, AMI ID) — don't assume variables survive between `aws___run_script` calls.
+
+You never type these yourself: tell Claude what you want ("create the worker role"), and Claude writes and runs the script. The snippets are the canonical recipe.
 
 ## Section 1 — OpenAI API key
 
@@ -64,128 +84,72 @@ Hold onto this `sk-...`. We'll inject it into the EC2 via AWS Secrets Manager in
 
 ### 2.1 — AWS account + region
 
-Sign up at https://aws.amazon.com/ if needed. Pick **one region** and stick with it for the whole course (we recommend `us-west-2`, `ap-northeast-1`, or `ap-southeast-1` for latency). The region you pick here is the same one you'll plug into Cowork's AWS API MCP settings in Section 2.0 next.
+Sign up at https://aws.amazon.com/ if needed. Pick **one region** and stick with it for the whole course (we recommend `us-west-2`, `ap-northeast-1`, or `ap-southeast-1` for latency). Every snippet below has a `REGION = "..."` line — set it to the region you pick here. If you already stored the OpenAI / Supabase secrets before running this skill (see 2.3), use the region where they live (`ListSecrets` shows it) and build everything else in that same region. (The AWS MCP endpoint itself lives in `us-east-1`; that does **not** decide where your EC2 is created — `region_name` does.)
 
-### 2.0 — Wire AWS credentials into Cowork
+### 2.0 — Connect AWS MCP to Cowork (OAuth, no access key)
 
-> Prerequisite: complete Section 2.1 above (AWS account + region pick), then come back here. Numbered 2.0 — not 2.2 — so this section is the FIRST thing you do inside the AWS account, before any `call_aws ...` invocation in Sections 2.2+.
+> Prerequisite: complete Section 2.1 above (AWS account + region pick), then come back here. Numbered 2.0 — not 2.2 — so this is the FIRST thing you do before any AWS call in Sections 2.2+.
 
-Cowork's AWS API MCP needs an AWS access key + secret to call `call_aws` on your behalf. The fastest course path is to create a dedicated IAM user with admin permissions, generate one access key, paste it into Cowork's MCP settings, and set a calendar reminder to delete the key when the course is done.
+AWS MCP signs you in through your browser (OAuth) — there is **no IAM user to create, no access key, and no `~/.aws/credentials` file**.
 
-> **Why a dedicated IAM user (not your AWS root account):** never use root for day-to-day work — even for solo learning. Root keys have no scoping, no audit per-key, no easy rotation. A named IAM user is the AWS-recommended floor.
+1. In Cowork: **Customize → Connectors**.
+2. If **AWS API MCP** is installed, **disable** it.
+3. **Add → AWS MCP**, using this server URL:
+   `https://aws-mcp.us-east-1.api.aws/mcp?oauth=initialize`
+4. Click through: **Continue → Add → Connect → Continue**. Wait for **Connecting…**
+5. **Sign into new session** — a browser window opens. Sign in to your AWS account as the **Root user** (the email + password you signed up with).
+6. When Cowork shows **Needs approval**, choose **Always allow**.
 
-#### 2.0.1 — Create the IAM user
+**Check it works** — ask Claude:
 
-In the AWS console (browser):
+> How many IAM users do I have now on my aws account?
 
-1. **IAM → Users → Create user**
-   - User name: `cowork-m1`
-   - Do **not** check "Provide user access to the AWS Management Console" — this user is for API access only.
-2. **Permissions → Attach policies directly → AdministratorAccess** → Next → Create user.
+Claude should answer with a number (0 is a normal answer on a fresh account). If Claude says the AWS tool isn't available or the sign-in expired, redo steps 4–6.
 
-> **About `AdministratorAccess`:** for a learning course this is the right call — Sections 2.2–2.7 of this skill touch IAM, EC2, SSM, and KMS, and the exact-minimum policy is ~15 actions across those services. We trade tighter IAM scope for a smoother first-time AWS experience. **At end of course, delete the key (2.0.5 below).** A future "production hardening" appendix can replace `AdministratorAccess` with the minimum scope.
+Nothing else to do for credentials at the end of the course: there's no key to delete. If you want to cut access, remove the AWS MCP connector in Customize → Connectors.
 
-#### 2.0.2 — Generate the access key
-
-1. Click into the freshly-created `cowork-m1` user → **Security credentials** tab → **Create access key**.
-2. Use case: **Application running outside AWS** → Next → Create access key.
-3. AWS shows two values **once and only once**:
-   - **Access key ID** — looks like `AKIA...` (20 chars)
-   - **Secret access key** — looks like `wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY`
-4. Copy both somewhere safe (password manager). If you close this page without copying the secret, AWS won't show it again — you'll have to delete the key and make a new one.
-
-#### 2.0.3 — Write the credentials into `~/.aws/credentials` via Claude Code CLI
-
-> **Why not just paste into Cowork's MCP settings UI?** Cowork's AWS API MCP reads credentials from the local AWS credentials file (`~/.aws/credentials` on Mac/Linux, `%USERPROFILE%\.aws\credentials` on Windows) — it does **not** have a UI field to type them into, and the Cowork sandbox can't read or write that file for you. The workaround: open **Claude Code CLI** locally, paste the prompt below, and let Claude Code write the file. Once written, restart Cowork and the AWS API MCP picks the credentials up automatically.
-
-1. Open the **Claude Code CLI** on the same machine where Cowork is running (`claude` in a terminal — install per https://claude.com/claude-code if you haven't).
-2. Paste this prompt verbatim, substituting your `AKIA...` and secret from 2.0.2:
-
-   ```
-   I have new AWS credentials I want to configure. Please write them to my AWS credentials file. Here are the values:
-   Access key ID: <paste AKIA... from 2.0.2>
-   Secret access key: <paste wJalrXUt... from 2.0.2>
-   First, detect whether I'm on Mac/Linux or Windows to determine the correct credentials file path
-   (~/.aws/credentials on Mac/Linux, %USERPROFILE%\.aws\credentials on Windows), 
-   then write the [default] profile with the new values — preserving any other existing profiles in the file.
-   Once done, test the connection using aws sts get-caller-identity.
-   ```
-
-3. Claude Code will: detect your OS → append/update the `[default]` profile in the credentials file (preserving any other profiles) → run `aws sts get-caller-identity` to confirm.
-4. Expect the final `aws sts get-caller-identity` output to be a JSON object with:
-   - `UserId` ending in `:cowork-m1`
-   - `Arn` ending in `user/cowork-m1`
-   - An `Account` number matching the AWS account you signed up with
-
-If `aws sts get-caller-identity` returns `Unable to locate credentials` or `InvalidClientTokenId`, the key/secret were typo'd or truncated on copy. Delete the key in IAM, create a new one, re-run the prompt above.
-
-5. **Set the region** for the `[default]` profile so AWS API MCP knows which region to target. In the same Claude Code CLI session:
-
-   ```
-   Also write `region = <us-west-2 | ap-northeast-1 | ap-southeast-1 — the one you picked in 2.1>` and `output = json` to the [default] profile in ~/.aws/config (or %USERPROFILE%\.aws\config on Windows).
-   ```
-
-6. **Restart Cowork** so the AWS API MCP re-reads the credentials file. After restart, Cowork should show AWS API MCP as connected.
-
-#### 2.0.4 — Verify via Cowork (one MCP call)
-
-Back in Cowork, run a harmless read to confirm the AWS API MCP can see the credentials Claude Code CLI just wrote:
-
-`call_aws sts get-caller-identity`
-
-Same expected output as the Claude Code CLI check in 2.0.3 step 4. If Cowork's MCP call fails but the CLI call succeeded, you most likely skipped the Cowork restart in 2.0.3 step 6 — restart Cowork and try again.
-
-#### 2.0.5 — End-of-course cleanup (set this reminder NOW)
-
-Long-lived access keys are the single biggest source of accidentally-leaked AWS credentials. Reduce the blast radius:
-
-- **After every M1 lecture session:** nothing to do — Cowork holds the key, the student doesn't paste it anywhere else.
-- **End of M4 / end of course:** **IAM → Users → cowork-m1 → Security credentials → Access keys → Actions → Delete**. The MCP will stop working; that's fine, you're done with the course.
-- **If you ever paste the key into a chat / commit / screenshot by accident:** delete it immediately (same path) and create a new one. Anyone who sees `AKIA...` + the matching secret has full AWS access until you revoke.
-
-Add a calendar reminder for ~6 weeks out: "Delete cowork-m1 access key if Course 2 is done."
-
-#### 2.0.6 — CLI-mode variant (skip if you're in Cowork)
-
-CLI-mode students do the same 2.0.1 + 2.0.2, then run `aws configure` directly in a terminal instead of going through the Claude Code CLI prompt:
-
-```bash
-aws configure
-# AWS Access Key ID:     <paste>
-# AWS Secret Access Key: <paste>
-# Default region name:   us-west-2
-# Default output format: json
-```
-
-`aws sts get-caller-identity` does the same verify as 2.0.4. (The Claude Code CLI path in 2.0.3 is essentially `aws configure` wrapped in a chat prompt — useful when the student doesn't want to remember the `aws configure` flags but is comfortable with Claude Code.)
-
-### 2.2 — Create the IAM instance profile (one MCP call)
+### 2.2 — Create the IAM instance profile
 
 The EC2 needs an IAM role that grants:
 - `AmazonSSMManagedInstanceCore` (the managed policy that gives SSM agent permission to phone home — that's how Cowork will run shell commands on the EC2 in 2.6 + 2.7 without SSH)
 - Read on the four Secrets Manager secrets we'll create in 2.3 (`openai-api-key`, `supabase-url`, `supabase-secret-key`, `supabase-publishable-key`) — added in Section 2.3 below as a separate inline policy on this same role
 
-Ask AWS API MCP to do it:
+Ask Claude to run this with `aws___run_script`:
 
+```python
+import json
+
+trust = {
+    "Version": "2012-10-17",
+    "Statement": [{
+        "Effect": "Allow",
+        "Principal": {"Service": "ec2.amazonaws.com"},
+        "Action": "sts:AssumeRole",
+    }],
+}
+
+await call_boto3(service_name="iam", operation_name="CreateRole",
+                 params={"RoleName": "m1-worker-role",
+                         "AssumeRolePolicyDocument": json.dumps(trust)})
+await call_boto3(service_name="iam", operation_name="AttachRolePolicy",
+                 params={"RoleName": "m1-worker-role",
+                         "PolicyArn": "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"})
+await call_boto3(service_name="iam", operation_name="CreateInstanceProfile",
+                 params={"InstanceProfileName": "m1-worker-profile"})
+await call_boto3(service_name="iam", operation_name="AddRoleToInstanceProfile",
+                 params={"InstanceProfileName": "m1-worker-profile",
+                         "RoleName": "m1-worker-role"})
+
+profile = await call_boto3(service_name="iam", operation_name="GetInstanceProfile",
+                           params={"InstanceProfileName": "m1-worker-profile"})
+result = {"profile": "m1-worker-profile",
+          "roles": [r["RoleName"] for r in profile["InstanceProfile"]["Roles"]]}
+result
 ```
-call_aws iam create-role --role-name m1-worker-role --assume-role-policy-document '{
-  "Version": "2012-10-17",
-  "Statement": [{
-    "Effect": "Allow",
-    "Principal": {"Service": "ec2.amazonaws.com"},
-    "Action": "sts:AssumeRole"
-  }]
-}'
 
-call_aws iam attach-role-policy --role-name m1-worker-role --policy-arn arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+**Verify:** the returned `roles` list contains `m1-worker-role`.
 
-call_aws iam create-instance-profile --instance-profile-name m1-worker-profile
-call_aws iam add-role-to-instance-profile --instance-profile-name m1-worker-profile --role-name m1-worker-role
-```
-
-(`suggest_aws_commands "create an instance profile with SSM access named m1-worker"` will produce similar — the canonical recipe is above.)
-
-**Verify:** `call_aws iam get-instance-profile --instance-profile-name m1-worker-profile` returns a JSON object with the role attached.
+> If `CreateRole` fails with `EntityAlreadyExists`, a previous run already created it — skip that call and continue with the next ones (or ask Claude to check what already exists first).
 
 ### 2.3 — Store OpenAI + Supabase secrets in AWS Secrets Manager
 
@@ -210,9 +174,9 @@ OpenAI is the third secret — the worker calls Whisper directly with that key.
 
 #### How the secret values flow from your eyes into Secrets Manager
 
-You paste each value into the Cowork chat as part of your prompt to Claude. Claude wraps it in a `call_aws secretsmanager create-secret` call. The value flows: your message → Cowork → AWS API MCP → AWS Secrets Manager (encrypted at rest with KMS). Once stored, you don't need the plaintext value again — only the EC2 reads it.
+You paste each value into the Cowork chat as part of your prompt to Claude. Claude puts it in an `aws___run_script` call that creates the secret. The value flows: your message → Cowork → AWS MCP → AWS Secrets Manager (encrypted at rest with KMS). Once stored, you don't need the plaintext value again — only the EC2 reads it.
 
-> **Chat-retention caveat:** the raw `sk-...` / `sb_secret_...` value briefly appears in your Cowork chat transcript on its way to `create-secret`. Cowork retains chat history; assume the value is recoverable from your account history for as long as that conversation is retained. This is acceptable for course-grade keys (the OpenAI cap is small, the Supabase secret key is scoped to a learning project), but you should still **rotate both keys at end of course** (revoke the OpenAI key in OpenAI dashboard → Settings → API Keys; rotate the Supabase secret key in Supabase dashboard → Project Settings → API Keys → roll). For a real production deployment you'd type the values into AWS Console → Secrets Manager via your browser, never through the chat — out of scope for this course.
+> **Chat-retention caveat:** the raw `sk-...` / `sb_secret_...` value briefly appears in your Cowork chat transcript on its way to Secrets Manager. Cowork retains chat history; assume the value is recoverable from your account history for as long as that conversation is retained. This is acceptable for course-grade keys (the OpenAI cap is small, the Supabase secret key is scoped to a learning project), but you should still **rotate both keys at end of course** (revoke the OpenAI key in OpenAI dashboard → Settings → API Keys; rotate the Supabase secret key in Supabase dashboard → Project Settings → API Keys → roll). For a real production deployment you'd type the values into AWS Console → Secrets Manager via your browser, never through the chat — out of scope for this course.
 
 #### Tell Claude
 
@@ -224,145 +188,241 @@ You paste each value into the Cowork chat as part of your prompt to Claude. Clau
 
 > **Why store both Supabase keys?** The M1 EC2 worker only reads the **Secret key** (it needs to bypass RLS to see all users' pending jobs). The **Publishable key** is stored alongside it as a convenience: future milestones may want to give the EC2 an RLS-respecting client (e.g. when the worker acts on behalf of a specific user), and having both in one place means students don't have to re-fetch from the Supabase dashboard later. M1 itself doesn't read it.
 
-Claude will run four `call_aws secretsmanager create-secret` invocations, one per secret:
+**Check first.** Many students store these four secrets in a separate step *before* running this skill. Claude runs the `ListSecrets` check (same script as **Verify** below) first and only creates the ones that are **missing**. An existing secret is never overwritten unless you paste a new value for it.
 
-```
-call_aws secretsmanager create-secret --name openai-api-key --secret-string '<sk-...>'
-call_aws secretsmanager create-secret --name supabase-url --secret-string 'https://<ref>.supabase.co'
-call_aws secretsmanager create-secret --name supabase-secret-key --secret-string '<sb_secret_...>'
-call_aws secretsmanager create-secret --name supabase-publishable-key --secret-string '<sb_publishable_...>'
-```
+For the missing ones, Claude creates them in one script (updating in place only when you supplied a replacement value):
 
-> If a secret already exists from a previous run, `create-secret` errors with `ResourceExistsException`. Use `put-secret-value --secret-id <name> --secret-string '<new value>'` to update an existing secret in place.
+```python
+REGION = "us-west-2"   # the region you picked in 2.1
+
+secrets = {
+    "openai-api-key": "<sk-...>",
+    "supabase-url": "https://<ref>.supabase.co",
+    "supabase-secret-key": "<sb_secret_...>",
+    "supabase-publishable-key": "<sb_publishable_...>",
+}
+
+out = {}
+for name, value in secrets.items():
+    try:
+        await call_boto3(service_name="secretsmanager", operation_name="CreateSecret",
+                         region_name=REGION,
+                         params={"Name": name, "SecretString": value})
+        out[name] = "created"
+    except ClientError as e:
+        if e.response["Error"]["Code"] == "ResourceExistsException":
+            await call_boto3(service_name="secretsmanager", operation_name="PutSecretValue",
+                             region_name=REGION,
+                             params={"SecretId": name, "SecretString": value})
+            out[name] = "updated"
+        else:
+            raise
+
+result = out
+result
+```
 
 Then add the IAM permission to read these to the worker role:
 
-```
-call_aws iam put-role-policy --role-name m1-worker-role --policy-name m1-secrets-read --policy-document '{
-  "Version": "2012-10-17",
-  "Statement": [{
-    "Effect": "Allow",
-    "Action": "secretsmanager:GetSecretValue",
-    "Resource": [
-      "arn:aws:secretsmanager:*:*:secret:openai-api-key-*",
-      "arn:aws:secretsmanager:*:*:secret:supabase-url-*",
-      "arn:aws:secretsmanager:*:*:secret:supabase-secret-key-*",
-      "arn:aws:secretsmanager:*:*:secret:supabase-publishable-key-*"
-    ]
-  }]
-}'
+```python
+import json
+
+policy = {
+    "Version": "2012-10-17",
+    "Statement": [{
+        "Effect": "Allow",
+        "Action": "secretsmanager:GetSecretValue",
+        "Resource": [
+            "arn:aws:secretsmanager:*:*:secret:openai-api-key-*",
+            "arn:aws:secretsmanager:*:*:secret:supabase-url-*",
+            "arn:aws:secretsmanager:*:*:secret:supabase-secret-key-*",
+            "arn:aws:secretsmanager:*:*:secret:supabase-publishable-key-*",
+        ],
+    }],
+}
+
+await call_boto3(service_name="iam", operation_name="PutRolePolicy",
+                 params={"RoleName": "m1-worker-role",
+                         "PolicyName": "m1-secrets-read",
+                         "PolicyDocument": json.dumps(policy)})
+result = {"policy": "m1-secrets-read attached to m1-worker-role"}
+result
 ```
 
 > The `-*` suffix on each ARN matches Secrets Manager's auto-appended random suffix (e.g. `openai-api-key-AbCdEf`). It scopes the role to *exactly* these four secret names without granting `secretsmanager:GetSecretValue *`.
 
 > **Why Secrets Manager (not Parameter Store)?** Both encrypt at rest with KMS, both can be scoped via IAM. Secrets Manager is the AWS-native home for application credentials — it has rotation hooks, audit-logging built in, and a more obvious name for "this is a secret." Parameter Store works fine for non-secret config; we use Secrets Manager here because the OpenAI key + Supabase keys are unambiguously credentials.
 
-**Verify:** `call_aws secretsmanager list-secrets --query 'SecretList[?Name==\`openai-api-key\` || Name==\`supabase-url\` || Name==\`supabase-secret-key\` || Name==\`supabase-publishable-key\`].Name'` returns the four names. (Don't fetch the `SecretString` values unless you're debugging — they're still plaintext at that point.)
+**Verify:** list the secrets and check all four names are present (don't read the `SecretString` values unless you're debugging — they're plaintext at that point):
+
+```python
+REGION = "us-west-2"
+wanted = {"openai-api-key", "supabase-url", "supabase-secret-key", "supabase-publishable-key"}
+resp = await call_boto3(service_name="secretsmanager", operation_name="ListSecrets",
+                        region_name=REGION)
+found = sorted(s["Name"] for s in resp["SecretList"] if s["Name"] in wanted)
+result = {"found": found, "missing": sorted(wanted - set(found))}
+result
+```
 
 ### 2.4 — Create a minimal security group
 
 No inbound rules at all. SSM is fully outbound — the EC2 phones home to SSM endpoints over HTTPS (443).
 
-```
-call_aws ec2 create-security-group --group-name m1-worker-sg --description "M1 worker — outbound only, SSM-managed"
+```python
+REGION = "us-west-2"
+sg = await call_boto3(service_name="ec2", operation_name="CreateSecurityGroup",
+                      region_name=REGION,
+                      params={"GroupName": "m1-worker-sg",
+                              "Description": "M1 worker - outbound only, SSM-managed"})
+result = {"group_id": sg["GroupId"]}
+result
 ```
 
 Note the returned `GroupId` (looks like `sg-0abc...`). Default outbound (allow all) is fine — no inbound edits needed.
 
-### 2.5 — Launch the EC2 (one MCP call)
+### 2.5 — Launch the EC2
 
-```
-call_aws ec2 run-instances \
-  --image-id <latest Ubuntu 22.04 AMI for your region> \
-  --instance-type t3.small \
-  --iam-instance-profile Name=m1-worker-profile \
-  --security-group-ids <sg-0abc...> \
-  --block-device-mappings '[{"DeviceName":"/dev/sda1","Ebs":{"VolumeSize":20,"VolumeType":"gp3"}}]' \
-  --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=m1-worker}]' \
-  --count 1
+The script looks up the latest Canonical-published Ubuntu 22.04 AMI for your region, then launches the instance:
+
+```python
+REGION = "us-west-2"
+SG_ID = "<sg-0abc... from 2.4>"
+
+ami = await call_boto3(
+    service_name="ssm", operation_name="GetParameter", region_name=REGION,
+    params={"Name": "/aws/service/canonical/ubuntu/server/22.04/stable/current/amd64/hvm/ebs-gp2/ami-id"})
+ami_id = ami["Parameter"]["Value"]
+
+run = await call_boto3(
+    service_name="ec2", operation_name="RunInstances", region_name=REGION,
+    params={
+        "ImageId": ami_id,
+        "InstanceType": "t3.small",
+        "MinCount": 1,
+        "MaxCount": 1,
+        "IamInstanceProfile": {"Name": "m1-worker-profile"},
+        "SecurityGroupIds": [SG_ID],
+        "BlockDeviceMappings": [{"DeviceName": "/dev/sda1",
+                                 "Ebs": {"VolumeSize": 20, "VolumeType": "gp3"}}],
+        "TagSpecifications": [{"ResourceType": "instance",
+                               "Tags": [{"Key": "Name", "Value": "m1-worker"}]}],
+    })
+result = {"instance_id": run["Instances"][0]["InstanceId"], "ami_id": ami_id}
+result
 ```
 
-**To find the AMI ID:** `call_aws ssm get-parameters --names /aws/service/canonical/ubuntu/server/22.04/stable/current/amd64/hvm/ebs-gp2/ami-id --query 'Parameters[0].Value' --output text` returns the latest Canonical-published Ubuntu 22.04 image in your region.
+> A brand-new instance profile can take ~10–20 seconds to become usable. If `RunInstances` fails with `Invalid IAM Instance Profile name`, wait a moment and run it again.
 
 **Wait for SSM to register the instance** (usually 1–2 min after launch):
 
-```
-call_aws ssm describe-instance-information --filters "Key=tag:Name,Values=m1-worker"
+```python
+REGION = "us-west-2"
+info = await call_boto3(
+    service_name="ssm", operation_name="DescribeInstanceInformation", region_name=REGION,
+    params={"Filters": [{"Key": "tag:Name", "Values": ["m1-worker"]}]})
+result = [{"instance_id": i["InstanceId"], "ping_status": i["PingStatus"]}
+          for i in info["InstanceInformationList"]]
+result
 ```
 
-When the instance appears with `PingStatus=Online`, it's ready for `send-command`. If it never appears, the IAM instance profile is the most likely culprit — confirm `m1-worker-profile` is attached via `call_aws ec2 describe-instances --filters "Name=tag:Name,Values=m1-worker" --query 'Reservations[0].Instances[0].IamInstanceProfile'`.
+When the instance appears with `ping_status = "Online"`, it's ready for `SendCommand`. If it never appears, the IAM instance profile is the most likely culprit — confirm `m1-worker-profile` is attached by running `DescribeInstances` (filter `tag:Name = m1-worker`) and checking `IamInstanceProfile` on the instance.
 
 ### 2.6 — Install ffmpeg / Python / git via SSM (no SSH)
 
-Grab the instance ID:
+This script finds the instance, sends the install commands through SSM Run Command, waits for them to finish, and returns the output:
 
-```
-INSTANCE_ID=$(call_aws ec2 describe-instances --filters "Name=tag:Name,Values=m1-worker" "Name=instance-state-name,Values=running" --query 'Reservations[0].Instances[0].InstanceId' --output text)
+```python
+REGION = "us-west-2"
+
+async def run_on_ec2(instance_id, commands, comment):
+    sent = await call_boto3(
+        service_name="ssm", operation_name="SendCommand", region_name=REGION,
+        params={"InstanceIds": [instance_id],
+                "DocumentName": "AWS-RunShellScript",
+                "Comment": comment,
+                "Parameters": {"commands": commands}})
+    command_id = sent["Command"]["CommandId"]
+    for _ in range(60):                       # up to ~5 min
+        await asyncio.sleep(5)
+        inv = await call_boto3(
+            service_name="ssm", operation_name="GetCommandInvocation", region_name=REGION,
+            params={"CommandId": command_id, "InstanceId": instance_id})
+        if inv["Status"] not in ("Pending", "InProgress", "Delayed"):
+            return {"status": inv["Status"],
+                    "stdout": inv["StandardOutputContent"],
+                    "stderr": inv["StandardErrorContent"]}
+    return {"status": "StillRunning", "command_id": command_id}
+
+desc = await call_boto3(
+    service_name="ec2", operation_name="DescribeInstances", region_name=REGION,
+    params={"Filters": [{"Name": "tag:Name", "Values": ["m1-worker"]},
+                        {"Name": "instance-state-name", "Values": ["running"]}]})
+instance_id = desc["Reservations"][0]["Instances"][0]["InstanceId"]
+
+result = await run_on_ec2(
+    instance_id,
+    ["sudo apt-get update",
+     "sudo apt-get install -y python3.12 python3.12-venv python3-pip ffmpeg git",
+     "ffmpeg -version | head -1",
+     "python3.12 --version"],
+    "M1: install ffmpeg, python3.12, git")
+result
 ```
 
-Run the install script via Run Command:
+You should see `ffmpeg version ...` and `Python 3.12.x` at the end of `stdout`. If apt errors, retry — Ubuntu's apt sometimes needs a moment after first boot.
 
-```
-call_aws ssm send-command \
-  --instance-ids "$INSTANCE_ID" \
-  --document-name "AWS-RunShellScript" \
-  --comment "M1: install ffmpeg, python3.12, git" \
-  --parameters 'commands=[
-    "sudo apt-get update",
-    "sudo apt-get install -y python3.12 python3.12-venv python3-pip ffmpeg git",
-    "ffmpeg -version | head -1",
-    "python3.12 --version"
-  ]'
-```
-
-The call returns a `CommandId`. Wait ~30 s, then read the output:
-
-```
-call_aws ssm list-command-invocations --command-id <CommandId> --details --query 'CommandInvocations[0].CommandPlugins[0].Output' --output text
-```
-
-You should see `ffmpeg version 4.x...` and `Python 3.12.x` at the end. If apt errors, retry — Ubuntu's apt sometimes needs a moment after first boot.
+> If the script returns `StillRunning`, the command is fine — it just outlasted the wait. Ask Claude to check it with `GetCommandInvocation` using the returned `command_id`.
 
 ### 2.7 — Clone the M0 repo + create the venv
 
-Same shape — one more `send-command`:
+Same shape — reuse the `run_on_ec2` helper and instance lookup from 2.6 (each `aws___run_script` call is self-contained, so Claude includes them again), then send:
 
-```
-call_aws ssm send-command \
-  --instance-ids "$INSTANCE_ID" \
-  --document-name "AWS-RunShellScript" \
-  --comment "M1: clone repo + create venv" \
-  --parameters 'commands=[
-    "sudo -u ubuntu bash -c \"cd /home/ubuntu && git clone https://github.com/<student-username>/<repo-name>.git app\"",
-    "sudo -u ubuntu bash -c \"mkdir -p /home/ubuntu/app/worker && cd /home/ubuntu/app/worker && python3.12 -m venv venv && ./venv/bin/pip install --upgrade pip\"",
-    "ls /home/ubuntu/app",
-    "ls /home/ubuntu/app/worker/venv/bin/python"
-  ]'
+```python
+result = await run_on_ec2(
+    instance_id,
+    ["sudo -u ubuntu bash -c \"cd /home/ubuntu && git clone https://github.com/<student-username>/<repo-name>.git app\"",
+     "sudo -u ubuntu bash -c \"mkdir -p /home/ubuntu/app/worker && cd /home/ubuntu/app/worker && python3.12 -m venv venv && ./venv/bin/pip install --upgrade pip\"",
+     "ls /home/ubuntu/app",
+     "ls /home/ubuntu/app/worker/venv/bin/python"],
+    "M1: clone repo + create venv")
+result
 ```
 
 Replace `<student-username>/<repo-name>` with the GitHub repo URL from M0. If the repo is private, the student needs a deploy key or a personal-access-token clone URL — pause and walk through that, then retry.
 
-Verify the command output via `list-command-invocations` again.
-
 ## Verify (one-shot)
 
-The end-of-prereq health check, all via MCP, no SSH:
+The end-of-prereq health check, all via MCP, no SSH. One script runs all three checks (include the `run_on_ec2` helper from 2.6):
 
-```
+```python
+REGION = "us-west-2"
+wanted = {"openai-api-key", "supabase-url", "supabase-secret-key", "supabase-publishable-key"}
+
 # 1. EC2 is running + SSM-managed
-call_aws ssm describe-instance-information --filters "Key=tag:Name,Values=m1-worker"
-# Expect: one row, PingStatus=Online
+info = await call_boto3(
+    service_name="ssm", operation_name="DescribeInstanceInformation", region_name=REGION,
+    params={"Filters": [{"Key": "tag:Name", "Values": ["m1-worker"]}]})
+ssm_rows = [{"instance_id": i["InstanceId"], "ping_status": i["PingStatus"]}
+            for i in info["InstanceInformationList"]]
+# Expect: one row, ping_status == "Online"
 
-# 2. ffmpeg + python installed
-call_aws ssm send-command \
-  --instance-ids "$INSTANCE_ID" \
-  --document-name "AWS-RunShellScript" \
-  --parameters 'commands=["ffmpeg -version | head -1 && python3.12 --version && ls /home/ubuntu/app/worker/venv/bin/python"]'
-# (then list-command-invocations to read the output)
+# 2. ffmpeg + python + venv installed
+instance_id = ssm_rows[0]["instance_id"]
+tools = await run_on_ec2(
+    instance_id,
+    ["ffmpeg -version | head -1 && python3.12 --version && ls /home/ubuntu/app/worker/venv/bin/python"],
+    "M1: verify tools")
 
 # 3. Secrets in AWS Secrets Manager
-call_aws secretsmanager list-secrets --query 'SecretList[?Name==`openai-api-key` || Name==`supabase-url` || Name==`supabase-secret-key` || Name==`supabase-publishable-key`].Name'
+resp = await call_boto3(service_name="secretsmanager", operation_name="ListSecrets",
+                        region_name=REGION)
+found = sorted(s["Name"] for s in resp["SecretList"] if s["Name"] in wanted)
 # Expect: all four names present
+
+result = {"ssm": ssm_rows, "tools": tools, "secrets_found": found,
+          "secrets_missing": sorted(wanted - set(found))}
+result
 ```
 
 If everything looks good, you're ready for the M1 main skill.
@@ -371,25 +431,30 @@ If everything looks good, you're ready for the M1 main skill.
 
 `t3.small` always-on ≈ **\$15/month** (us-west-2 on-demand as of writing). EBS 20 GiB gp3 ≈ \$1.60/mo whether the instance is running or stopped.
 
-**Stop the EC2 when not actively running an M1 lecture:**
+**Stop the EC2 when not actively running an M1 lecture** — ask Claude "stop the m1-worker EC2". It finds the instance by its `Name=m1-worker` tag and calls `ec2 StopInstances`:
 
-```
-call_aws ec2 stop-instances --instance-ids "$INSTANCE_ID"
+```python
+REGION = "us-west-2"
+desc = await call_boto3(
+    service_name="ec2", operation_name="DescribeInstances", region_name=REGION,
+    params={"Filters": [{"Name": "tag:Name", "Values": ["m1-worker"]},
+                        {"Name": "instance-state-name", "Values": ["running"]}]})
+instance_id = desc["Reservations"][0]["Instances"][0]["InstanceId"]
+await call_boto3(service_name="ec2", operation_name="StopInstances", region_name=REGION,
+                 params={"InstanceIds": [instance_id]})
+result = {"stopping": instance_id}
+result
 ```
 
-To resume:
+To resume, ask "start the m1-worker EC2" — same script with `StartInstances`, filtering on `instance-state-name = stopped`.
 
-```
-call_aws ec2 start-instances --instance-ids "$INSTANCE_ID"
-```
-
-A **stopped** instance pays ~\$0 for compute (EBS only). The instance ID stays the same, so the same `send-command` workflow keeps working.
+A **stopped** instance pays ~\$0 for compute (EBS only). The instance ID stays the same, so the same SSM `SendCommand` workflow keeps working.
 
 > **No Elastic IP needed.** SSM doesn't care about the instance's public IP — it talks to AWS endpoints via the SSM agent. Skip the EIP cost entirely.
 
 ## CLI-mode variant (if the student isn't in Cowork)
 
-Everything in this skill works identically with the `aws` CLI in a local terminal — replace each `call_aws <subcommand>` with `aws <subcommand>`. The only difference: in CLI mode the student authenticates `aws` (via `aws configure` with an IAM access key, or `aws sso login`); in Cowork mode the AWS API MCP is already authenticated through Cowork's connector setup.
+The same operations exist in the `aws` CLI — `call_boto3(service_name="iam", operation_name="CreateRole", ...)` is `aws iam create-role ...`, and so on. In CLI mode the student authenticates the `aws` CLI their own way (`aws sso login` or `aws configure`); in Cowork mode there is nothing to configure beyond the AWS MCP sign-in in Section 2.0.
 
 The **SSH/PEM/EC2-console path is intentionally NOT documented** in this skill. SSM is the only access pattern. If a student insists on SSH (or their org disallows SSM), they'll need a different M1 prereq variant — not in scope here.
 
