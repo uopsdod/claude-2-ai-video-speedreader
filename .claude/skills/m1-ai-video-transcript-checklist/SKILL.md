@@ -23,15 +23,15 @@ Every check in this skill goes through MCP — no SSH, no terminal required (con
 |---|---|---|
 | A — Schema | `supabase db execute` / dashboard | `mcp__supabase_remote__list_tables` / `execute_sql` |
 | B — Web app | `curl` + `gh api` | `mcp__vercel__*` + `mcp__playwright__browser_*` if available; otherwise student paste-back |
-| C — EC2 worker host | `aws ssm send-command ...` from local terminal | `call_aws ssm send-command ...` via AWS API MCP |
-| D — End-to-end transcribe | `mcp__supabase_remote__execute_sql` + browser submit + `aws ssm send-command` log read | `mcp__supabase_remote__execute_sql` + browser submit + `call_aws ssm send-command` log read |
-| E — Cleanup hygiene | `aws ec2 describe-instances` / `stop-instances` | `call_aws ec2 describe-instances` / `stop-instances` |
+| C — EC2 worker host | `aws ssm send-command ...` from local terminal | SSM `SendCommand` via AWS MCP (`aws___run_script` + `run_on_ec2` helper) |
+| D — End-to-end transcribe | `mcp__supabase_remote__execute_sql` + browser submit + `aws ssm send-command` log read | `mcp__supabase_remote__execute_sql` + browser submit + SSM log read via AWS MCP |
+| E — Cleanup hygiene | `aws ec2 describe-instances` / `stop-instances` | `ec2 DescribeInstances` / `StopInstances` via AWS MCP |
 
 The conversational flow is the same in both modes — only the tool choices differ. **There is no SSH path** in either mode.
 
 ## How to run
 
-This skill is meant to be invoked directly by the student (e.g. they type `驗收 M1`). You (Claude) **actively execute** each check via MCP — Supabase MCP for DB, Vercel MCP for the web side, AWS API MCP (`call_aws ssm send-command`) for the EC2.
+This skill is meant to be invoked directly by the student (e.g. they type `驗收 M1`). You (Claude) **actively execute** each check via MCP — Supabase MCP for DB, Vercel MCP for the web side, AWS MCP (`aws___run_script`, running SSM `SendCommand`) for the EC2.
 
 ### Step 1: Collect inputs from the student (one message)
 
@@ -51,31 +51,59 @@ Confirm the right MCPs are available:
 
 - `mcp__supabase_remote__*` (required for Sections A + D)
 - `mcp__vercel__*` (required for Section B)
-- `call_aws` from AWS API MCP (required for Sections C + E)
+- **AWS MCP** — `aws___run_script` (required for Sections C + E). If it's missing or calls fail with a sign-in error, reconnect it per `m1-ai-video-transcript-prerequisites` §2.0. If the old **AWS API MCP** (`call_aws`) is still enabled, have the student disable it.
 
-Resolve the EC2 instance ID up front so later checks can reuse it:
+Every AWS MCP script is self-contained, so each one you run for Sections C–E starts with this preamble — the `run_on_ec2` helper plus the tag-based instance lookup (same as `m1-ai-video-transcript` Step 6). Set `REGION` to the region the student picked in M1 prereq §2.1:
 
+```python
+REGION = "us-west-2"
+
+async def run_on_ec2(instance_id, commands, comment):
+    sent = await call_boto3(
+        service_name="ssm", operation_name="SendCommand", region_name=REGION,
+        params={"InstanceIds": [instance_id],
+                "DocumentName": "AWS-RunShellScript",
+                "Comment": comment,
+                "Parameters": {"commands": commands}})
+    command_id = sent["Command"]["CommandId"]
+    for _ in range(60):                       # up to ~5 min
+        await asyncio.sleep(5)
+        inv = await call_boto3(
+            service_name="ssm", operation_name="GetCommandInvocation", region_name=REGION,
+            params={"CommandId": command_id, "InstanceId": instance_id})
+        if inv["Status"] not in ("Pending", "InProgress", "Delayed"):
+            return {"status": inv["Status"],
+                    "stdout": inv["StandardOutputContent"],
+                    "stderr": inv["StandardErrorContent"]}
+    return {"status": "StillRunning", "command_id": command_id}
+
+desc = await call_boto3(
+    service_name="ec2", operation_name="DescribeInstances", region_name=REGION,
+    params={"Filters": [{"Name": "tag:Name", "Values": ["m1-worker"]},
+                        {"Name": "instance-state-name", "Values": ["running"]}]})
+instances = [i for r in desc["Reservations"] for i in r["Instances"]]
+instance_id = instances[0]["InstanceId"] if instances else None
 ```
-INSTANCE_ID=$(call_aws ec2 describe-instances --filters "Name=tag:Name,Values=m1-worker" "Name=instance-state-name,Values=running" --query 'Reservations[0].Instances[0].InstanceId' --output text)
+
+**Preflight script** (preamble + these lines, one `aws___run_script` call):
+
+```python
+info = await call_boto3(
+    service_name="ssm", operation_name="DescribeInstanceInformation", region_name=REGION,
+    params={"Filters": [{"Key": "tag:Name", "Values": ["m1-worker"]}]})
+wanted = {"openai-api-key", "supabase-url", "supabase-secret-key", "supabase-publishable-key"}
+secrets = await call_boto3(service_name="secretsmanager", operation_name="ListSecrets",
+                           region_name=REGION)
+found = sorted(x["Name"] for x in secrets["SecretList"] if x["Name"] in wanted)
+result = {"instance_id": instance_id,
+          "ssm": [{"id": i["InstanceId"], "ping": i["PingStatus"]} for i in info["InstanceInformationList"]],
+          "secrets_found": found, "secrets_missing": sorted(wanted - set(found))}
+result
 ```
 
-If `INSTANCE_ID` is empty: the EC2 is stopped or the tag is missing. Start it (`call_aws ec2 start-instances --instance-ids <id>`) or go back to M1 prereq.
-
-Confirm SSM can reach it:
-
-```
-call_aws ssm describe-instance-information --instance-information-filter-list "key=InstanceIds,valueSet=$INSTANCE_ID"
-```
-
-`PingStatus` must be `Online`. If not, the IAM instance profile is misconfigured — back to M1 prereq §2.2.
-
-Confirm the four M1 secrets exist in Secrets Manager:
-
-```
-call_aws secretsmanager list-secrets --query 'SecretList[?Name==`openai-api-key` || Name==`supabase-url` || Name==`supabase-secret-key` || Name==`supabase-publishable-key`].Name'
-```
-
-Must return all four names. If any of the first three (`openai-api-key`, `supabase-url`, `supabase-secret-key`) is missing, the worker will crash on first poll with `ResourceNotFoundException`. If `supabase-publishable-key` is missing, the worker still runs (M1 doesn't read it) but follow-on milestones may break — re-create it via M1 prereq §2.3.
+- `instance_id` is `None`: the EC2 is stopped, the tag is missing, or `REGION` is wrong. Start it (`ec2 StartInstances`, see [[aws-best-practice]] Rule 9) or go back to M1 prereq.
+- `ssm` must show the instance with `ping` = `Online`. If not, the IAM instance profile is misconfigured — back to M1 prereq §2.2.
+- Secrets: `secrets_missing` must be empty. If any of the first three (`openai-api-key`, `supabase-url`, `supabase-secret-key`) is missing, the worker will crash on first poll with `ResourceNotFoundException`. If `supabase-publishable-key` is missing, the worker still runs (M1 doesn't read it) but follow-on milestones may break — re-create it via M1 prereq §2.3.
 
 ---
 
@@ -110,19 +138,19 @@ If B2 still shows Vite: the Vite→Next.js conversion didn't take. Re-run Claude
 
 ### Section C — EC2 worker host (7 checks, all via SSM)
 
-All Section C checks run as one consolidated `send-command` per check (via `call_aws` in Cowork or `aws` CLI in CLI mode). Read each command's output via `call_aws ssm list-command-invocations --command-id <id> --details --query 'CommandInvocations[0].CommandPlugins[0].Output' --output text`.
+Each Section C check is one `run_on_ec2(instance_id, [<commands>], "<comment>")` call (preflight preamble included); the **How to verify** column lists the `commands` list. `run_on_ec2` waits for the command and returns its `stdout` / `stderr`. You can run all of C1–C7 in a single `aws___run_script` call to save round-trips. (CLI mode: `aws ssm send-command` with `--parameters '{"commands":[...]}'`.)
 
 | # | Check | How to verify |
 |---|---|---|
-| C1 | EC2 reachable via SSM | `call_aws ssm send-command --instance-ids "$INSTANCE_ID" --document-name AWS-RunShellScript --parameters '{"commands":["echo reachable"]}'` returns `reachable` after polling for the result. (If `send-command` itself fails with `InvalidInstanceId`, the instance isn't SSM-managed — back to M1 prereq.) Use the JSON form, not `'commands=[...]'` shorthand — the shorthand parser chokes on brackets through the MCP shell layer. |
-| C2 | ffmpeg installed | `commands=["ffmpeg -version \| head -1"]` returns a version line starting with `ffmpeg version`. |
-| C3 | Python 3.12 + venv ready | `commands=["ls /home/ubuntu/app/worker/venv/bin/python && /home/ubuntu/app/worker/venv/bin/python --version"]` returns the python path and `Python 3.12.x`. |
-| C4 | Worker code + service file present | `commands=["ls /home/ubuntu/app/worker/worker.py /home/ubuntu/app/worker/distributor.py /home/ubuntu/app/worker/requirements.txt /home/ubuntu/app/worker/m1-distributor.service && [ ! -f /home/ubuntu/app/worker/.env ] && echo 'no .env (good)' \|\| echo 'WARNING: .env exists, secrets should live in AWS Secrets Manager, not on disk'"]` lists all four worker files **and** confirms there is no `.env` file (M1 reads secrets from AWS Secrets Manager via `boto3`; a `.env` on disk indicates the student copy-pasted from an older version of the skill). |
-| C5 | Distributor service running | `{"commands":["sudo systemctl is-active m1-distributor.service","sudo tail -10 /var/log/m1-distributor.log"]}` returns `active` followed by the last 10 worker-log lines. **Read `/var/log/m1-distributor.log`, NOT `journalctl`** — the unit file redirects stdout/stderr to that file, so journalctl only shows lifecycle events (Started/Stopped). The log should include a recent `distributor: polling every 10s` or `spawned worker for job ...` line (proof the loop is alive, not just the process started). |
-| C6 | Unit file has `Environment=PATH=` including the venv bin dir | `{"commands":["grep '^Environment=PATH' /etc/systemd/system/m1-distributor.service"]}` must return a line containing `/home/ubuntu/app/worker/venv/bin`. Without this, systemd's default PATH (`/usr/bin:/bin`) hides `yt-dlp`, and every job dies with `FileNotFoundError: 'yt-dlp'` — visible in `/var/log/m1-distributor.log` but NOT in `journalctl`, and NOT caught by C5 (the service is still "active"). |
-| C7 | Unit file's `AWS_DEFAULT_REGION` matches this EC2's actual region | `{"commands":["grep '^Environment=AWS_DEFAULT_REGION' /etc/systemd/system/m1-distributor.service"]}` returns the region. Cross-check against `call_aws ec2 describe-instances --instance-ids "$INSTANCE_ID" --query 'Reservations[0].Instances[0].Placement.AvailabilityZone' --output text` (strip the trailing letter). They must match. Mismatch → `NoRegionError` on first Secrets Manager call → worker can't authenticate. |
+| C1 | EC2 reachable via SSM | `["echo reachable"]` returns `status` = `Success` with `stdout` = `reachable`. (If `SendCommand` itself fails with `InvalidInstanceId`, the instance isn't SSM-managed — back to M1 prereq.) |
+| C2 | ffmpeg installed | `["ffmpeg -version \| head -1"]` returns a version line starting with `ffmpeg version`. |
+| C3 | Python 3.12 + venv ready | `["ls /home/ubuntu/app/worker/venv/bin/python && /home/ubuntu/app/worker/venv/bin/python --version"]` returns the python path and `Python 3.12.x`. |
+| C4 | Worker code + service file present | `["ls /home/ubuntu/app/worker/worker.py /home/ubuntu/app/worker/distributor.py /home/ubuntu/app/worker/requirements.txt /home/ubuntu/app/worker/m1-distributor.service && [ ! -f /home/ubuntu/app/worker/.env ] && echo 'no .env (good)' \|\| echo 'WARNING: .env exists, secrets should live in AWS Secrets Manager, not on disk'"]` lists all four worker files **and** confirms there is no `.env` file (M1 reads secrets from AWS Secrets Manager via `boto3`; a `.env` on disk indicates the student copy-pasted from an older version of the skill). |
+| C5 | Distributor service running | `["sudo systemctl is-active m1-distributor.service","sudo tail -10 /var/log/m1-distributor.log"]` returns `active` followed by the last 10 worker-log lines. **Read `/var/log/m1-distributor.log`, NOT `journalctl`** — the unit file redirects stdout/stderr to that file, so journalctl only shows lifecycle events (Started/Stopped). The log should include a recent `distributor: polling every 10s` or `spawned worker for job ...` line (proof the loop is alive, not just the process started). |
+| C6 | Unit file has `Environment=PATH=` including the venv bin dir | `["grep '^Environment=PATH' /etc/systemd/system/m1-distributor.service"]` must return a line containing `/home/ubuntu/app/worker/venv/bin`. Without this, systemd's default PATH (`/usr/bin:/bin`) hides `yt-dlp`, and every job dies with `FileNotFoundError: 'yt-dlp'` — visible in `/var/log/m1-distributor.log` but NOT in `journalctl`, and NOT caught by C5 (the service is still "active"). |
+| C7 | Unit file's `AWS_DEFAULT_REGION` matches this EC2's actual region | `["grep '^Environment=AWS_DEFAULT_REGION' /etc/systemd/system/m1-distributor.service"]` returns the region. Cross-check against the instance's actual region: `instances[0]["Placement"]["AvailabilityZone"][:-1]` from the preamble. They must match. Mismatch → `NoRegionError` on first Secrets Manager call → worker can't authenticate. |
 
-If C5 fails but C1–C4 pass: the service is installed but not running. Start it via SSM: `{"commands":["sudo systemctl start m1-distributor.service"]}`. If it crashes immediately, read `/var/log/m1-distributor.log` (most-likely causes: `AWS_DEFAULT_REGION` wrong → see C7; IAM role missing the `m1-secrets-read` inline policy granting `secretsmanager:GetSecretValue`; one of the three secret names — `openai-api-key`, `supabase-url`, `supabase-secret-key` — not yet created in Secrets Manager).
+If C5 fails but C1–C4 pass: the service is installed but not running. Start it via SSM: `run_on_ec2(instance_id, ["sudo systemctl start m1-distributor.service"], ...)`. If it crashes immediately, read `/var/log/m1-distributor.log` (most-likely causes: `AWS_DEFAULT_REGION` wrong → see C7; IAM role missing the `m1-secrets-read` inline policy granting `secretsmanager:GetSecretValue`; one of the three secret names — `openai-api-key`, `supabase-url`, `supabase-secret-key` — not yet created in Secrets Manager).
 
 If C6 fails: edit `worker/m1-distributor.service` in the repo to include `Environment=PATH=/home/ubuntu/app/worker/venv/bin:/usr/local/bin:/usr/bin:/bin`, push, then re-run Step 6a + 6b in the main skill (the EC2 needs to `cp` the updated unit into `/etc/systemd/system/` and `daemon-reload`).
 
@@ -142,7 +170,7 @@ When the student confirms:
 |---|---|---|
 | D1 | Job row created with `status='pending'` | `mcp__supabase_remote__execute_sql`: `SELECT id, status, video_source_url, created_at FROM jobs ORDER BY created_at DESC LIMIT 1`. The `created_at` must be within the last 2 minutes; status starts at `pending`. |
 | D2 | Within 10–20 s, status flips to `downloading` | Re-run the query. If still `pending`, the distributor isn't picking up — go back to C5. |
-| D3 | Within 1–3 minutes, status reaches `done` | Re-run the query every 30 s. Walks `pending → downloading → transcribe → done`. If it stops at `downloading` or `transcribe`, read the worker log via SSM: `call_aws ssm send-command --instance-ids "$INSTANCE_ID" --document-name AWS-RunShellScript --parameters '{"commands":["tail -50 /var/log/m1-distributor.log"]}'`. Most common errors: `FileNotFoundError: 'yt-dlp'` (C6 — PATH missing), `NoRegionError` (C7 — region mismatch), `OPENAI_API_KEY` typo in Secrets Manager, `ffmpeg` missing, or **the student tried a YouTube URL** (YouTube rate-limits cloud IPs — use Internet Archive / Wikimedia / a direct .mp4 URL instead). |
+| D3 | Within 1–3 minutes, status reaches `done` | Re-run the query every 30 s. Walks `pending → downloading → transcribe → done`. If it stops at `downloading` or `transcribe`, read the worker log via SSM: `run_on_ec2(instance_id, ["tail -50 /var/log/m1-distributor.log"], ...)` (preflight preamble). Most common errors: `FileNotFoundError: 'yt-dlp'` (C6 — PATH missing), `NoRegionError` (C7 — region mismatch), `OPENAI_API_KEY` typo in Secrets Manager, `ffmpeg` missing, or **the student tried a YouTube URL** (YouTube rate-limits cloud IPs — use Internet Archive / Wikimedia / a direct .mp4 URL instead). |
 | D4 | The transcript is plausible | `mcp__supabase_remote__execute_sql`: `SELECT length(subtitle_txt_content) AS chars, left(subtitle_txt_content, 200) AS preview FROM job_sessions WHERE job_id = (SELECT id FROM jobs ORDER BY created_at DESC LIMIT 1)`. `chars` should be > 50; the preview should look like real text in the language the student selected (not English when `zh` was chosen, etc.). |
 | D5 | Transcript column on `/upload` shows a working download link for the done job | Manually: the student opens `/upload` signed in and clicks the `.txt` link in the Transcript column for the just-completed job. A file named `transcript-<short>.txt` should download, opening to readable text matching D4's preview. If the click does nothing or downloads an error JSON, B6/B7 are misconfigured even though the backend is fine. |
 
@@ -156,7 +184,7 @@ Not strictly functional — but the student needs to understand cost.
 
 | # | Check | How to verify |
 |---|---|---|
-| E1 | Student knows how to stop the EC2 | Ask: 「上完課要怎麼把 EC2 停掉？」 Acceptable answer: `call_aws ec2 stop-instances --instance-ids "$INSTANCE_ID"` (or the same via `aws` CLI / AWS console — but the MCP one-liner is the canonical course answer since the rest of the milestone uses MCP). Wrong answer: "I'll just leave it running" — explain the ~\$15/mo cost. Bonus: confirm by running it together and watching `call_aws ec2 describe-instances ... --query 'Reservations[0].Instances[0].State.Name'` flip to `stopping` then `stopped`. |
+| E1 | Student knows how to stop the EC2 | Ask: 「上完課要怎麼把 EC2 停掉？」 Acceptable answer: ask Claude to stop the `m1-worker` EC2 (it runs `ec2 StopInstances` through AWS MCP — see [[aws-best-practice]] Rule 9). The AWS console or `aws` CLI also count, but the Cowork ask is the canonical course answer since the rest of the milestone runs through MCP. Wrong answer: "I'll just leave it running" — explain the ~\$15/mo cost. Bonus: confirm by running it together and watching the instance's `State.Name` (from `ec2 DescribeInstances`) flip to `stopping` then `stopped`. |
 | E2 | OpenAI key has billing limits set | Open https://platform.openai.com/settings/organization/limits — confirm there's a soft limit (e.g. \$10/month) so a runaway worker doesn't drain the credit balance. Not technically required to pass M1 but strongly recommended; mark ⚠️ if missing rather than ❌. |
 
 ---
